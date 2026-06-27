@@ -1,0 +1,57 @@
+[
+  {
+    "colaborador": "Nalleli Guajardo Maximino",
+    "fecha": "2026-06-26",
+    "horas": {
+      "Hora de Conocimiento de Ruta": "09:33",
+      "Hora de Entrega de Etiquetas": "10:45",
+      "Hora de Término de Preparación": "00:30",
+      "Hora de Entrega de Papeles": "00:45",
+      "Hora de Salida": "13:02",
+      "Hora de Llegada (Comida)": "18:16"
+    },
+    "minutos_prep": -543,
+    "guardado": "26/06/2026 15:58"
+  },
+  {
+    "colaborador": "CARLOS ISMAEL RUIZ FITZ",
+    "fecha": "2026-06-26",
+    "tipo_ruta": "Ruta Local",
+    "destino": "CDMX SUR",
+    "horas": {
+      "Hora de Conocimiento de Ruta": "09:33",
+      "Hora de Entrega de Etiquetas": "10:00",
+      "Hora de Término de Preparación": "11:00",
+      "Hora de Entrega de Papeles": "12:03",
+      "Hora de Llegada (Comida)": "18:06"
+    },
+    "minutos_prep": 87,
+    "minutos_ruta": null,
+    "meta_prep": 180,
+    "efic_prep": 206.9,
+    "nivel_prep": "Óptimo",
+    "cumplimientos": {
+      "Hora de Conocimiento de Ruta": {
+        "hora_real": "09:33",
+        "meta": "09:40",
+        "cumple": true
+      },
+      "Hora de Entrega de Etiquetas": {
+        "hora_real": "10:00",
+        "meta": "09:55",
+        "cumple": false
+      },
+      "Hora de Término de Preparación": {
+        "hora_real": "11:00",
+        "meta": "10:40",
+        "cumple": false
+      },
+      "Hora de Entrega de Papeles": {
+        "hora_real": "12:03",
+        "meta": "11:00",
+        "cumple": false
+      }
+    },
+    "guardado": "26/06/2026 19:07"
+  }
+]

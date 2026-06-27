@@ -1,0 +1,24 @@
+[
+  {
+    "id": 1,
+    "fecha": "26/06/2026 16:01",
+    "colaborador": "Nalleli Guajardo Maximino",
+    "tipo": "Otro",
+    "turno": "Matutino",
+    "responsable": "pues el mas vergas",
+    "observaciones": "No deja a sebastian",
+    "estatus": "Resuelta"
+  },
+  {
+    "id": 2,
+    "fecha": "26/06/2026 20:08",
+    "colaborador": "CARLOS ISMAEL RUIZ FITZ",
+    "tipo": "Mal Etiquetado",
+    "responsable": "SEBASTIAN",
+    "observaciones": "Etiqueta desprendida de pedidos",
+    "estatus": "Resuelta",
+    "solucion": "pegarle",
+    "resuelto_por": "DIEGO",
+    "fecha_resolucion": "26/06/2026 20:11"
+  }
+]

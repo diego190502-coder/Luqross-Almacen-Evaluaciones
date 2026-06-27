@@ -1,0 +1,189 @@
+import json, os
+
+COLABORADORES_FILE = "colaboradores.json"
+
+colaboradores = [
+    {
+        "nombre": "CARLOS ISMAEL RUIZ FITZ",
+        "puesto": "CHOFER ALMACENISTA",
+        "actividades": [
+            "ETIQUETADO CORRECTO",
+            "PRODUCTO CORRECTO",
+            "PREPARACIÓN DE PEDIDO",
+            "CORRECTA LIMPIEZA DE PEDIDOS",
+            "CUIDADO AL MANEJAR MATERIAL",
+            "CORRECTO PREPARACION DE PAQUETE",
+            "LIMPIEZA DE ALMACEN",
+            "LIMPIEZA DE UNIDADES",
+            "ENTREGA DE PEDIDOS",
+            "EVITAR REENVIOS"
+        ]
+    },
+    {
+        "nombre": "VICTOR ALDAIR MIRAMON MORALES",
+        "puesto": "CHOFER ALMACENISTA",
+        "actividades": [
+            "ETIQUETADO CORRECTO",
+            "PRODUCTO CORRECTO",
+            "PREPARACIÓN DE PEDIDO",
+            "CORRECTA LIMPIEZA DE PEDIDOS",
+            "CUIDADO AL MANEJAR MATERIAL",
+            "CORRECTO PREPARACION DE PAQUETE",
+            "LIMPIEZA DE ALMACEN",
+            "LIMPIEZA DE UNIDADES",
+            "ENTREGA DE PEDIDOS",
+            "EVITAR REENVIOS"
+        ]
+    },
+    {
+        "nombre": "DANIEL RIVAS PARRA",
+        "puesto": "CHOFER ALMACENISTA",
+        "actividades": [
+            "ETIQUETADO CORRECTO",
+            "PRODUCTO CORRECTO",
+            "PREPARACIÓN DE PEDIDO",
+            "CORRECTA LIMPIEZA DE PEDIDOS",
+            "CUIDADO AL MANEJAR MATERIAL",
+            "CORRECTO PREPARACION DE PAQUETE",
+            "LIMPIEZA DE ALMACEN",
+            "LIMPIEZA DE UNIDADES",
+            "ENTREGA DE PEDIDOS",
+            "EVITAR REENVIOS"
+        ]
+    },
+    {
+        "nombre": "OSCAR ALFREDO TORRES CAMBRON",
+        "puesto": "CHOFER ALMACENISTA",
+        "actividades": [
+            "ETIQUETADO CORRECTO",
+            "PRODUCTO CORRECTO",
+            "PREPARACIÓN DE PEDIDO",
+            "CORRECTA LIMPIEZA DE PEDIDOS",
+            "CUIDADO AL MANEJAR MATERIAL",
+            "CORRECTO PREPARACION DE PAQUETE",
+            "LIMPIEZA DE ALMACEN",
+            "LIMPIEZA DE UNIDADES",
+            "ENTREGA DE PEDIDOS",
+            "EVITAR REENVIOS"
+        ]
+    },
+    {
+        "nombre": "SEBASTIAN YAEL DURAN PAREDES",
+        "puesto": "ALMACENISTA",
+        "actividades": [
+            "ENTREGA DE MATERIAL EN ZONA DE PREPARACION",
+            "SUPERVISION DE ETIQUETADO",
+            "SUPERVISION DE PREPARACION DE PEDIDOS",
+            "CORRECTA LIMPIEZA DE PEDIDOS",
+            "ACOMODO DE MATERIAL",
+            "EVITAR REENVIOS",
+            "REVISION DE LIMPIEZA DE UNIDADES",
+            "REVISION DE LIMPIEZA DE ALMACEN",
+            "PRIMERAS SALIDAS PEMPS",
+            "CONTEOS CICLICOS"
+        ]
+    },
+    {
+        "nombre": "PEDRO ISMAEL RODRIGUEZ VALDES",
+        "puesto": "CHOFER ALMACENISTA",
+        "actividades": [
+            "CORRECTO ETIQUETADO",
+            "PRODUCTO CORRECTO",
+            "PREPARACION DE PEDIDO",
+            "CORRECTA LIMPIEZA DE PEDIDOS",
+            "CUIDADO AL MANEJAR MATERIAL",
+            "CORRECTO PREPARACION DE PAQUETE",
+            "LIMPIEZA DE ALMACEN",
+            "LIMPIEZA DE UNIDADES",
+            "ENTREGA DE PAQUETES COMPLETOS",
+            "EVITAR REENVIOS"
+        ]
+    },
+    {
+        "nombre": "ALAN",
+        "puesto": "ALMACENISTA",
+        "actividades": [
+            "CORRECTO ETIQUETADO",
+            "PRODUCTO CORRECTO",
+            "PREPARACION DE PEDIDO",
+            "CORRECTA LIMPIEZA DE PEDIDOS",
+            "CUIDADO AL MANEJAR MATERIAL",
+            "CORRECTO PREPARACION DE PAQUETE",
+            "LIMPIEZA DE ALMACEN",
+            "LIMPIEZA DE UNIDADES",
+            "EVITAR REPROCESOS",
+            "EVITAR REENVIOS"
+        ]
+    },
+    {
+        "nombre": "ALEJANDRO ISRAEL MUÑOZ RIVERA",
+        "puesto": "ALMACENISTA",
+        "actividades": [
+            "CORRECTO ETIQUETADO",
+            "PRODUCTO CORRECTO",
+            "PREPARACION DE PEDIDO",
+            "CORRECTA LIMPIEZA DE PEDIDOS",
+            "CUIDADO AL MANEJAR MATERIAL",
+            "CORRECTO PREPARACION DE PAQUETE",
+            "LIMPIEZA DE ALMACEN",
+            "LIMPIEZA DE UNIDADES",
+            "EVITAR REPROCESOS",
+            "EVITAR REENVIOS"
+        ]
+    },
+    {
+        "nombre": "GAMALIEL ISAID RUIZ GARCIA",
+        "puesto": "ALMACENISTA",
+        "actividades": [
+            "CORRECTO ETIQUETADO",
+            "PRODUCTO CORRECTO",
+            "PREPARACION DE PEDIDO",
+            "CORRECTA LIMPIEZA DE PEDIDOS",
+            "CUIDADO AL MANEJAR MATERIAL",
+            "CORRECTO PREPARACION DE PAQUETE",
+            "LIMPIEZA DE ALMACEN",
+            "LIMPIEZA DE UNIDADES",
+            "EVITAR REPROCESOS",
+            "EVITAR REENVIOS"
+        ]
+    },
+    {
+        "nombre": "GIOVANNI",
+        "puesto": "ALMACENISTA",
+        "actividades": [
+            "CORRECTO ETIQUETADO",
+            "PRODUCTO CORRECTO",
+            "PREPARACION DE PEDIDO",
+            "CORRECTA LIMPIEZA DE PEDIDOS",
+            "CUIDADO AL MANEJAR MATERIAL",
+            "CORRECTO PREPARACION DE PAQUETE",
+            "LIMPIEZA DE ALMACEN",
+            "LIMPIEZA DE UNIDADES",
+            "EVITAR REPROCESOS",
+            "EVITAR REENVIOS"
+        ]
+    },
+    {
+        "nombre": "NALLELI GUAJARDO MAXIMINO",
+        "puesto": "BECARIA",
+        "actividades": [
+            "REGISTRAR ETIQUETAS EN SISTEMA",
+            "EVITAR QUIEBRES DE STOCK ETIQUETAS",
+            "CONTROL DE SALIDAS Y ENTRADAS DE ETIQUETAS",
+            "REVISION DE CORRECTO ETIQUETADO",
+            "LIMPIEZA DE PRODUCTOS",
+            "REVISION DE MATERIAL COMPLETO",
+            "ENTREGA DE ETIQUETAS QR",
+            "ENTREGA DE ETIQUETAS",
+            "REGISTRO DIARIO DE TARIMAS",
+            "INCIDENCIAS REGISTRADAS"
+        ]
+    }
+]
+
+with open(COLABORADORES_FILE, "w", encoding="utf-8") as f:
+    json.dump(colaboradores, f, ensure_ascii=False, indent=2)
+
+print(f"✓ {len(colaboradores)} colaboradores guardados correctamente.")
+for c in colaboradores:
+    print(f"  → {c['nombre']} ({c['puesto']}) — {len(c['actividades'])} actividades")
