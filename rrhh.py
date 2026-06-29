@@ -30,7 +30,11 @@ META_PAQ   = 300
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
 def get_conn():
-    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+    url = DATABASE_URL
+    # Railway requiere SSL
+    if "sslmode" not in url:
+        url += "?sslmode=require"
+    return psycopg2.connect(url, cursor_factory=RealDictCursor)
 
 def init_db():
     """Crear tablas si no existen"""
