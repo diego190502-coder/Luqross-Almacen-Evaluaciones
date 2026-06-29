@@ -5,6 +5,8 @@ from pydantic import BaseModel
 from typing import Optional, List, Dict
 import json, os
 from datetime import datetime
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
 app = FastAPI(title="LUQROSS | RRHH")
 
@@ -13,11 +15,6 @@ for d in ["static", "static/fotos", "static/incidencias"]:
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-COLABORADORES_FILE = "colaboradores.json"
-EVALUACIONES_FILE  = "evaluaciones.json"
-INCIDENCIAS_FILE   = "incidencias.json"
-TIEMPOS_FILE       = "tiempos.json"
-HORAS_FILE         = "horas.json"
 FONT_FILE  = "Strasua.ttf"
 LOGO_FILE  = "logo.png"
 
@@ -29,15 +26,106 @@ ACTIVIDADES_HORAS = ["Hora de Conocimiento de Ruta","Hora de Entrega de Etiqueta
 META_LOCAL = 180
 META_PAQ   = 300
 
-def leer(p):
-    if os.path.exists(p):
-        try:
-            with open(p,"r",encoding="utf-8") as f: return json.load(f)
-        except: return []
-    return []
+# ── Base de datos PostgreSQL ───────────────────────────────────────────────
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
-def escribir(p,d):
-    with open(p,"w",encoding="utf-8") as f: json.dump(d,f,ensure_ascii=False,indent=2)
+def get_conn():
+    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+
+def init_db():
+    """Crear tablas si no existen"""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS colaboradores (
+            nombre TEXT PRIMARY KEY,
+            puesto TEXT,
+            actividades JSONB
+        );
+        CREATE TABLE IF NOT EXISTS evaluaciones (
+            id SERIAL PRIMARY KEY,
+            colaborador TEXT,
+            anio INT,
+            mes INT,
+            dia INT,
+            calificaciones JSONB,
+            promedio FLOAT,
+            pct FLOAT,
+            guardado TEXT,
+            UNIQUE(colaborador, anio, mes, dia)
+        );
+        CREATE TABLE IF NOT EXISTS incidencias (
+            id SERIAL PRIMARY KEY,
+            fecha TEXT,
+            colaborador TEXT,
+            tipo TEXT,
+            responsable TEXT,
+            ingresado_por TEXT,
+            observaciones TEXT,
+            estatus TEXT DEFAULT 'Abierta',
+            solucion TEXT,
+            resuelto_por TEXT,
+            fecha_resolucion TEXT,
+            foto TEXT
+        );
+        CREATE TABLE IF NOT EXISTS horas (
+            id SERIAL PRIMARY KEY,
+            colaborador TEXT,
+            fecha TEXT,
+            tipo_ruta TEXT,
+            destino TEXT,
+            horas JSONB,
+            minutos_prep INT,
+            minutos_ruta INT,
+            meta_prep INT,
+            efic_prep FLOAT,
+            nivel_prep TEXT,
+            cumplimientos JSONB,
+            guardado TEXT,
+            UNIQUE(colaborador, fecha)
+        );
+        CREATE TABLE IF NOT EXISTS tiempos (
+            id SERIAL PRIMARY KEY,
+            fecha TEXT,
+            colaborador TEXT,
+            tipo_ruta TEXT,
+            modelo_tarea TEXT,
+            minutos INT,
+            meta_minutos INT,
+            eficiencia FLOAT,
+            nivel TEXT,
+            observaciones TEXT
+        );
+    """)
+    conn.commit()
+    cur.close()
+    conn.close()
+
+# Inicializar BD al arrancar
+try:
+    init_db()
+except Exception as ex:
+    print(f"⚠ Error iniciando BD: {ex}")
+
+# ── Helpers BD ─────────────────────────────────────────────────────────────
+def db_fetch(sql, params=()):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(sql, params)
+    rows = cur.fetchall()
+    cur.close(); conn.close()
+    return [dict(r) for r in rows]
+
+def db_exec(sql, params=()):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(sql, params)
+    result = None
+    try: result = cur.fetchone()
+    except: pass
+    conn.commit()
+    cur.close(); conn.close()
+    return dict(result) if result else None
 
 # ── Modelos ────────────────────────────────────────────────────────────────
 class Colaborador(BaseModel):
@@ -77,17 +165,18 @@ class Tiempo(BaseModel):
 # ── API colaboradores ──────────────────────────────────────────────────────
 @app.post("/api/colaborador")
 def add_colab(c: Colaborador):
-    lista = leer(COLABORADORES_FILE)
-    if any(x["nombre"].lower()==c.nombre.lower() for x in lista):
-        raise HTTPException(400,"Ya existe.")
-    lista.append({"nombre":c.nombre.strip(),"puesto":c.puesto.strip(),"actividades":c.actividades})
-    escribir(COLABORADORES_FILE,lista)
-    return {"ok":True}
+    try:
+        db_exec("INSERT INTO colaboradores (nombre,puesto,actividades) VALUES (%s,%s,%s)",
+                (c.nombre.strip(), c.puesto.strip(), json.dumps(c.actividades)))
+        return {"ok":True}
+    except Exception as e:
+        if "unique" in str(e).lower() or "duplicate" in str(e).lower():
+            raise HTTPException(400,"Ya existe.")
+        raise HTTPException(500, str(e))
 
 @app.delete("/api/colaborador/{nombre}")
 def del_colab(nombre:str):
-    lista=[x for x in leer(COLABORADORES_FILE) if x["nombre"]!=nombre]
-    escribir(COLABORADORES_FILE,lista)
+    db_exec("DELETE FROM colaboradores WHERE nombre=%s", (nombre,))
     return {"ok":True}
 
 @app.post("/api/colaborador/{nombre}/foto")
@@ -98,35 +187,33 @@ async def subir_foto(nombre:str, file:UploadFile=File(...)):
 
 @app.put("/api/colaborador/{nombre}/actividades")
 def update_actividades(nombre:str, body:dict):
-    lista=leer(COLABORADORES_FILE)
-    for c in lista:
-        if c["nombre"]==nombre:
-            c["actividades"]=body.get("actividades",[])
-    escribir(COLABORADORES_FILE,lista)
+    db_exec("UPDATE colaboradores SET actividades=%s WHERE nombre=%s",
+            (json.dumps(body.get("actividades",[])), nombre))
     return {"ok":True}
 
 # ── API evaluaciones diarias ──────────────────────────────────────────────
 @app.post("/api/evaluacion")
 def guardar_eval(e: EvalDia):
-    lista=leer(EVALUACIONES_FILE)
-    # Reemplazar si ya existe entrada del mismo día y colaborador
-    lista=[x for x in lista if not(x["colaborador"]==e.colaborador and
-           x["anio"]==e.anio and x["mes"]==e.mes and x["dia"]==e.dia)]
-    total_vals=[v for v in e.calificaciones.values()]
-    promedio=round(sum(total_vals)/len(total_vals),2) if total_vals else 0
-    pct=round((promedio/5)*100,1)
-    lista.append({
-        "colaborador":e.colaborador,"anio":e.anio,"mes":e.mes,"dia":e.dia,
-        "calificaciones":e.calificaciones,"promedio":promedio,"pct":pct,
-        "guardado":datetime.now().strftime("%d/%m/%Y %H:%M")
-    })
-    escribir(EVALUACIONES_FILE,lista)
+    total_vals = list(e.calificaciones.values())
+    promedio = round(sum(total_vals)/len(total_vals),2) if total_vals else 0
+    pct = round((promedio/5)*100,1)
+    db_exec("""INSERT INTO evaluaciones (colaborador,anio,mes,dia,calificaciones,promedio,pct,guardado)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+               ON CONFLICT (colaborador,anio,mes,dia)
+               DO UPDATE SET calificaciones=%s, promedio=%s, pct=%s, guardado=%s""",
+            (e.colaborador, e.anio, e.mes, e.dia, json.dumps(e.calificaciones), promedio, pct,
+             datetime.now().strftime("%d/%m/%Y %H:%M"),
+             json.dumps(e.calificaciones), promedio, pct, datetime.now().strftime("%d/%m/%Y %H:%M")))
     return {"ok":True,"pct":pct}
 
 @app.get("/api/evaluaciones/{nombre}/{anio}/{mes}")
 def get_eval_mes(nombre:str,anio:int,mes:int):
-    lista=leer(EVALUACIONES_FILE)
-    return [x for x in lista if x["colaborador"]==nombre and x["anio"]==anio and x["mes"]==mes]
+    rows = db_fetch("SELECT * FROM evaluaciones WHERE colaborador=%s AND anio=%s AND mes=%s",
+                    (nombre, anio, mes))
+    for r in rows:
+        if isinstance(r.get("calificaciones"), str):
+            r["calificaciones"] = json.loads(r["calificaciones"])
+    return rows
 
 # ── Importar Excel masivo (una pestaña por colaborador) ────────────────────
 @app.post("/api/importar-excel")
@@ -134,8 +221,10 @@ async def importar_excel(file: UploadFile = File(...)):
     import pandas as pd
     try:
         xls = pd.ExcelFile(file.file, engine="openpyxl")
-        colaboradores = leer(COLABORADORES_FILE)
-        evaluaciones  = leer(EVALUACIONES_FILE)
+        colaboradores = db_fetch("SELECT * FROM colaboradores")
+        for c in colaboradores:
+            if isinstance(c.get("actividades"), str):
+                c["actividades"] = json.loads(c["actividades"])
         resumen = []
         errores = []
 
@@ -212,18 +301,14 @@ async def importar_excel(file: UploadFile = File(...)):
                         promedio = round(sum(vals)/len(vals), 2)
                         pct = round((promedio/5)*100, 1)
 
-                        # Eliminar si ya existe ese día
-                        evaluaciones = [x for x in evaluaciones if not(
-                            x["colaborador"]==colab_match["nombre"] and
-                            x["anio"]==anio and x["mes"]==mes and x["dia"]==dia)]
-
-                        evaluaciones.append({
-                            "colaborador": colab_match["nombre"],
-                            "anio": anio, "mes": mes, "dia": dia,
-                            "calificaciones": calificaciones,
-                            "promedio": promedio, "pct": pct,
-                            "guardado": datetime.now().strftime("%d/%m/%Y %H:%M")
-                        })
+                        # Guardar en BD (upsert)
+                        db_exec("""INSERT INTO evaluaciones (colaborador,anio,mes,dia,calificaciones,promedio,pct,guardado)
+                                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                                   ON CONFLICT (colaborador,anio,mes,dia)
+                                   DO UPDATE SET calificaciones=%s,promedio=%s,pct=%s,guardado=%s""",
+                                (colab_match["nombre"], anio, mes, dia,
+                                 json.dumps(calificaciones), promedio, pct, datetime.now().strftime("%d/%m/%Y %H:%M"),
+                                 json.dumps(calificaciones), promedio, pct, datetime.now().strftime("%d/%m/%Y %H:%M")))
                         dias_registrados += 1
                     except: continue
 
@@ -237,7 +322,6 @@ async def importar_excel(file: UploadFile = File(...)):
                 errores.append(f"Pestaña '{sheet_name}': error al leer — {str(e)}")
                 continue
 
-        escribir(EVALUACIONES_FILE, evaluaciones)
         return {
             "status": "success",
             "resumen": resumen,
@@ -251,48 +335,33 @@ async def importar_excel(file: UploadFile = File(...)):
 # ── API incidencias ────────────────────────────────────────────────────────
 @app.post("/api/incidencia")
 def guardar_inc(i:Incidencia):
-    lista=leer(INCIDENCIAS_FILE)
     tipo_final = i.tipo_personalizado.strip() if i.tipo == "Otro" and i.tipo_personalizado else i.tipo
-    nuevo_id = len(lista) + 1
-    lista.append({"id":nuevo_id,"fecha":datetime.now().strftime("%d/%m/%Y %H:%M"),
-                  "colaborador":i.colaborador,"tipo":tipo_final,
-                  "responsable":i.responsable,"ingresado_por":i.ingresado_por,
-                  "observaciones":i.observaciones,"estatus":"Abierta"})
-    escribir(INCIDENCIAS_FILE,lista)
-    return {"ok":True, "id": nuevo_id}
+    r = db_exec("""INSERT INTO incidencias (fecha,colaborador,tipo,responsable,ingresado_por,observaciones,estatus)
+                   VALUES (%s,%s,%s,%s,%s,%s,'Abierta') RETURNING id""",
+                (datetime.now().strftime("%d/%m/%Y %H:%M"), i.colaborador, tipo_final,
+                 i.responsable, i.ingresado_por, i.observaciones))
+    return {"ok":True, "id": r["id"] if r else 0}
 
 @app.post("/api/incidencia/{inc_id}/foto")
 async def subir_foto_incidencia(inc_id: int, file: UploadFile = File(...)):
     ext = os.path.splitext(file.filename)[1].lower() or ".jpg"
     path = f"static/incidencias/{inc_id}{ext}"
     with open(path, "wb") as b: b.write(await file.read())
-    # Guardar ruta en el registro
-    lista = leer(INCIDENCIAS_FILE)
-    for x in lista:
-        if x["id"] == inc_id:
-            x["foto"] = f"/static/incidencias/{inc_id}{ext}"
-    escribir(INCIDENCIAS_FILE, lista)
-    return {"ok": True, "foto": f"/static/incidencias/{inc_id}{ext}"}
+    foto_url = f"/static/incidencias/{inc_id}{ext}"
+    db_exec("UPDATE incidencias SET foto=%s WHERE id=%s", (foto_url, inc_id))
+    return {"ok": True, "foto": foto_url}
 
 @app.patch("/api/incidencia/{inc_id}/resolver")
 def resolver_inc(inc_id:int, body:dict={}):
-    lista=leer(INCIDENCIAS_FILE)
-    for x in lista:
-        if x["id"]==inc_id:
-            x["estatus"]="Resuelta"
-            x["solucion"]=body.get("solucion","").strip()
-            x["resuelto_por"]=body.get("resuelto_por","").strip()
-            x["fecha_resolucion"]=datetime.now().strftime("%d/%m/%Y %H:%M")
-    escribir(INCIDENCIAS_FILE,lista)
+    db_exec("""UPDATE incidencias SET estatus='Resuelta', solucion=%s, resuelto_por=%s, fecha_resolucion=%s
+               WHERE id=%s""",
+            (body.get("solucion","").strip(), body.get("resuelto_por","").strip(),
+             datetime.now().strftime("%d/%m/%Y %H:%M"), inc_id))
     return {"ok":True}
 
 # ── API horas ──────────────────────────────────────────────────────────────
 @app.post("/api/horas")
 def guardar_horas(h:RegistroHoras):
-    lista=leer(HORAS_FILE)
-    lista=[x for x in lista if not(x["colaborador"]==h.colaborador and x["fecha"]==h.fecha)]
-
-    # Calcular minutos de preparación: Conocimiento de Ruta → Término de Preparación
     minutos_prep=None
     try:
         inicio=h.horas.get("Hora de Conocimiento de Ruta","")
@@ -303,7 +372,6 @@ def guardar_horas(h:RegistroHoras):
             minutos_prep=(hf[0]*60+hf[1])-(hi[0]*60+hi[1])
     except: pass
 
-    # Calcular minutos de ruta: Inicio de Ruta → Regreso
     minutos_ruta=None
     try:
         sal=h.horas.get("Hora de Salida","")
@@ -314,73 +382,94 @@ def guardar_horas(h:RegistroHoras):
             minutos_ruta=(hr[0]*60+hr[1])-(hs[0]*60+hs[1])
     except: pass
 
-    # Eficiencia de preparación según tipo de ruta
     meta = META_LOCAL if h.tipo_ruta == "Ruta Local" else META_PAQ
     efic_prep = round((meta / minutos_prep) * 100, 1) if minutos_prep and minutos_prep > 0 else None
     nivel_prep = None
     if efic_prep is not None:
         nivel_prep = "Óptimo" if efic_prep >= 100 else ("Aceptable" if efic_prep >= 80 else "Por mejorar")
 
-    # Validaciones de cumplimiento de horarios máximos
     METAS_HORA = {
-        "Hora de Conocimiento de Ruta":    "09:40",
-        "Hora de Entrega de Etiquetas":    "09:55",
-        "Hora de Término de Preparación":  "10:40",
-        "Hora de Entrega de Papeles":      "11:00",
-        "Hora de Salida":                  "12:10",
+        "Hora de Conocimiento de Ruta":"09:40","Hora de Entrega de Etiquetas":"09:55",
+        "Hora de Término de Preparación":"10:40","Hora de Entrega de Papeles":"11:00","Hora de Salida":"12:10",
     }
     cumplimientos = {}
     for act, meta_hora in METAS_HORA.items():
         val = h.horas.get(act, "")
         if val:
             try:
-                hv = list(map(int, val.split(":")))
-                hm = list(map(int, meta_hora.split(":")))
-                cumplimientos[act] = {
-                    "hora_real": val,
-                    "meta": meta_hora,
-                    "cumple": (hv[0]*60+hv[1]) <= (hm[0]*60+hm[1])
-                }
+                hv=list(map(int,val.split(":"))); hm=list(map(int,meta_hora.split(":")))
+                cumplimientos[act]={"hora_real":val,"meta":meta_hora,"cumple":(hv[0]*60+hv[1])<=(hm[0]*60+hm[1])}
             except: pass
 
-    lista.append({
-        "colaborador": h.colaborador,
-        "fecha": h.fecha,
-        "tipo_ruta": h.tipo_ruta,
-        "destino": h.destino,
-        "horas": h.horas,
-        "minutos_prep": minutos_prep,
-        "minutos_ruta": minutos_ruta,
-        "meta_prep": meta,
-        "efic_prep": efic_prep,
-        "nivel_prep": nivel_prep,
-        "cumplimientos": cumplimientos,
-        "guardado": datetime.now().strftime("%d/%m/%Y %H:%M")
-    })
-    escribir(HORAS_FILE, lista)
+    db_exec("""INSERT INTO horas (colaborador,fecha,tipo_ruta,destino,horas,minutos_prep,minutos_ruta,
+               meta_prep,efic_prep,nivel_prep,cumplimientos,guardado)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+               ON CONFLICT (colaborador,fecha)
+               DO UPDATE SET tipo_ruta=%s,destino=%s,horas=%s,minutos_prep=%s,minutos_ruta=%s,
+               meta_prep=%s,efic_prep=%s,nivel_prep=%s,cumplimientos=%s,guardado=%s""",
+            (h.colaborador, h.fecha, h.tipo_ruta, h.destino, json.dumps(h.horas),
+             minutos_prep, minutos_ruta, meta, efic_prep, nivel_prep,
+             json.dumps(cumplimientos), datetime.now().strftime("%d/%m/%Y %H:%M"),
+             h.tipo_ruta, h.destino, json.dumps(h.horas), minutos_prep, minutos_ruta,
+             meta, efic_prep, nivel_prep, json.dumps(cumplimientos), datetime.now().strftime("%d/%m/%Y %H:%M")))
     return {"ok": True, "minutos_prep": minutos_prep, "efic_prep": efic_prep, "nivel_prep": nivel_prep}
+
+@app.patch("/api/horas/regreso")
+def actualizar_regreso(body: dict):
+    colaborador  = body.get("colaborador","").strip()
+    fecha        = body.get("fecha","").strip()
+    hora_regreso = body.get("hora_regreso","").strip()
+    rows = db_fetch("SELECT * FROM horas WHERE colaborador=%s AND fecha=%s", (colaborador, fecha))
+    if not rows:
+        raise HTTPException(400, "No se encontró el registro.")
+    row = rows[0]
+    horas_dict = row["horas"] if isinstance(row["horas"], dict) else json.loads(row["horas"])
+    horas_dict["Hora de Llegada (Comida)"] = hora_regreso
+    minutos_ruta = None
+    try:
+        sal = horas_dict.get("Hora de Salida","")
+        if sal:
+            hs=list(map(int,sal.split(":"))); hr=list(map(int,hora_regreso.split(":")))
+            minutos_ruta=(hr[0]*60+hr[1])-(hs[0]*60+hs[1])
+    except: pass
+    db_exec("UPDATE horas SET horas=%s, minutos_ruta=%s WHERE colaborador=%s AND fecha=%s",
+            (json.dumps(horas_dict), minutos_ruta, colaborador, fecha))
+    return {"ok": True}
 
 @app.post("/api/tiempo")
 def guardar_tiempo(t:Tiempo):
-    lista=leer(TIEMPOS_FILE)
     meta=META_LOCAL if t.tipo_ruta=="Ruta Local" else META_PAQ
     eficiencia=round((meta/t.minutos)*100,1) if t.minutos>0 else 0
     nivel="Óptimo" if eficiencia>=100 else ("Aceptable" if eficiencia>=80 else "Por mejorar")
-    lista.append({"id":len(lista)+1,"fecha":datetime.now().strftime("%d/%m/%Y %H:%M"),
-                  "colaborador":t.colaborador,"tipo_ruta":t.tipo_ruta,"modelo_tarea":t.modelo_tarea,
-                  "minutos":t.minutos,"meta_minutos":meta,"eficiencia":eficiencia,"nivel":nivel,
-                  "observaciones":t.observaciones})
-    escribir(TIEMPOS_FILE,lista)
+    db_exec("""INSERT INTO tiempos (fecha,colaborador,tipo_ruta,modelo_tarea,minutos,meta_minutos,eficiencia,nivel,observaciones)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (datetime.now().strftime("%d/%m/%Y %H:%M"), t.colaborador, t.tipo_ruta,
+             t.modelo_tarea, t.minutos, meta, eficiencia, nivel, t.observaciones))
     return {"ok":True,"eficiencia":eficiencia,"nivel":nivel}
 
 # ── Página principal ───────────────────────────────────────────────────────
 @app.get("/", response_class=HTMLResponse)
 def pagina():
-    colaboradores=leer(COLABORADORES_FILE)
-    evaluaciones =leer(EVALUACIONES_FILE)
-    incidencias  =leer(INCIDENCIAS_FILE)
-    tiempos      =leer(TIEMPOS_FILE)
-    horas        =leer(HORAS_FILE)
+    colaboradores = db_fetch("SELECT * FROM colaboradores ORDER BY nombre")
+    for c in colaboradores:
+        if isinstance(c.get("actividades"), str):
+            c["actividades"] = json.loads(c["actividades"])
+
+    evaluaciones = db_fetch("SELECT * FROM evaluaciones ORDER BY anio,mes,dia")
+    for e in evaluaciones:
+        if isinstance(e.get("calificaciones"), str):
+            e["calificaciones"] = json.loads(e["calificaciones"])
+
+    incidencias = db_fetch("SELECT * FROM incidencias ORDER BY id DESC")
+
+    tiempos = db_fetch("SELECT * FROM tiempos ORDER BY id DESC")
+
+    horas = db_fetch("SELECT * FROM horas ORDER BY fecha DESC LIMIT 80")
+    for h in horas:
+        if isinstance(h.get("horas"), str):
+            h["horas"] = json.loads(h["horas"])
+        if isinstance(h.get("cumplimientos"), str):
+            h["cumplimientos"] = json.loads(h["cumplimientos"])
 
     logo_html=f'<img src="/static/{LOGO_FILE}" alt="LUQROSS" class="w-28 h-auto object-contain block mr-4 select-none">' if os.path.exists(f"static/{LOGO_FILE}") else ""
     opts_colab="".join([f'<option value="{c["nombre"]}">{c["nombre"]}</option>' for c in colaboradores])
@@ -483,6 +572,11 @@ def pagina():
             tipo_badge = ('bg-blue-500/10 text-blue-400 border-blue-500/20' if h.get('tipo_ruta')=='Ruta Local'
                           else 'bg-purple-500/10 text-purple-400 border-purple-500/20')
             h_safe = json.dumps(h).replace("'", "\\'")
+            tiene_regreso = h.get('horas',{}).get('Hora de Llegada (Comida)','')
+            btn_regreso = f"""<button onclick="event.stopPropagation();abrirModalRegreso('{h['colaborador']}','{h['fecha']}')"
+                class="text-[9px] font-bold text-amber-400 hover:text-amber-300 border border-amber-500/30 hover:border-amber-400 px-2 py-0.5 rounded-lg transition-colors whitespace-nowrap">
+                {'✓ ' + tiene_regreso if tiene_regreso else '+ Regreso'}
+            </button>"""
             filas_horas+=f"""<tr class="border-b border-gray-800 hover:bg-gray-900/30 text-xs cursor-pointer transition-colors" onclick='verHoras({json.dumps(h)})'>
                 <td class="px-3 py-2.5 font-mono text-gray-400 text-[10px]">{h['fecha']}</td>
                 <td class="px-3 py-2.5 font-bold text-white uppercase text-[10px]">{h['colaborador']}</td>
@@ -493,6 +587,7 @@ def pagina():
                   {'<div class="flex items-center gap-1.5"><div class="flex-1 h-1.5 bg-gray-800 rounded-full"><div class="' + bc + ' h-full rounded-full" style="width:' + str(min(pct_bar,100)) + '%"></div></div><span class="font-black text-[10px] ' + cn + '">' + efic_str + '</span></div>' if efic else '<span class="text-gray-600">—</span>'}
                 </td>
                 <td class="px-3 py-2.5 text-center text-[11px]">{sem}</td>
+                <td class="px-3 py-2.5 text-center">{btn_regreso}</td>
             </tr>"""
 
     # JSON para JS
@@ -529,6 +624,31 @@ input[type=range]{{accent-color:#eab308;}}
 </style>
 </head>
 <body class="text-gray-100 min-h-screen flex flex-col items-center px-2 py-3 pb-16">
+
+<!-- MODAL actualizar hora de regreso -->
+<div id="modal-regreso" class="hidden fixed inset-0 z-50 bg-gray-950/90 backdrop-blur-sm flex items-center justify-center p-4">
+  <div class="bg-gray-900 border border-gray-800 rounded-2xl p-6 w-full max-w-sm space-y-4">
+    <div class="flex justify-between items-center">
+      <h3 class="text-xs font-bold text-amber-400 font-custom uppercase">Registrar Hora de Regreso</h3>
+      <button onclick="document.getElementById('modal-regreso').classList.add('hidden')" class="text-gray-500 hover:text-white font-bold">✕</button>
+    </div>
+    <input type="hidden" id="regreso-colaborador">
+    <input type="hidden" id="regreso-fecha">
+    <div class="bg-gray-950/60 border border-gray-800 rounded-xl p-3 text-xs text-gray-400 space-y-1">
+      <p><span class="text-gray-500">Operador:</span> <span id="regreso-nombre-display" class="font-bold text-white uppercase"></span></p>
+      <p><span class="text-gray-500">Fecha:</span> <span id="regreso-fecha-display" class="font-mono text-yellow-500"></span></p>
+    </div>
+    <div>
+      <label class="lbl">Hora de Llegada / Regreso</label>
+      <input id="regreso-hora" type="time" class="field font-mono text-lg text-center font-bold">
+    </div>
+    <div class="flex gap-3">
+      <button onclick="document.getElementById('modal-regreso').classList.add('hidden')" class="flex-1 bg-gray-800 hover:bg-gray-700 text-gray-300 font-bold py-2.5 rounded-xl text-xs uppercase font-custom transition-colors">Cancelar</button>
+      <button onclick="guardarRegreso()" class="flex-1 bg-amber-500 hover:bg-amber-400 text-gray-950 font-black py-2.5 rounded-xl text-xs uppercase font-custom transition-colors">Guardar</button>
+    </div>
+    <div id="res-regreso" class="hidden p-2 text-center text-xs font-bold rounded-xl"></div>
+  </div>
+</div>
 
 <!-- MODAL detalle horas -->
 <div id="modal-horas" class="hidden fixed inset-0 z-50 bg-gray-950/90 backdrop-blur-sm flex items-center justify-center p-4">
@@ -1078,6 +1198,7 @@ input[type=range]{{accent-color:#eab308;}}
             <th class="px-3 py-2 text-center">T. Prep</th>
             <th class="px-3 py-2 text-center">Efic.</th>
             <th class="px-3 py-2 text-center">Cumplimiento</th>
+            <th class="px-3 py-2 text-center">Regreso</th>
           </tr></thead>
           <tbody>{filas_horas}</tbody>
         </table>
@@ -1643,6 +1764,35 @@ async function guardarInc() {{
 async function resolverInc(id) {{
   // Redirige al modal — función de compatibilidad
   abrirModalResolver(id);
+}}
+
+// ── Actualizar hora de regreso ────────────────────────────────────────────
+function abrirModalRegreso(colaborador, fecha) {{
+  document.getElementById('regreso-colaborador').value = colaborador;
+  document.getElementById('regreso-fecha').value = fecha;
+  document.getElementById('regreso-nombre-display').innerText = colaborador;
+  document.getElementById('regreso-fecha-display').innerText = fecha;
+  document.getElementById('regreso-hora').value = '';
+  document.getElementById('res-regreso').classList.add('hidden');
+  document.getElementById('modal-regreso').classList.remove('hidden');
+}}
+
+async function guardarRegreso() {{
+  const colaborador  = document.getElementById('regreso-colaborador').value;
+  const fecha        = document.getElementById('regreso-fecha').value;
+  const hora_regreso = document.getElementById('regreso-hora').value;
+  if (!hora_regreso) {{ showRes('res-regreso','⚠ Ingresa la hora de regreso.','err'); return; }}
+  const r = await fetch('/api/horas/regreso', {{
+    method: 'PATCH',
+    headers: {{'Content-Type':'application/json'}},
+    body: JSON.stringify({{ colaborador, fecha, hora_regreso }})
+  }});
+  if (r.ok) {{
+    showRes('res-regreso','✓ Hora de regreso guardada.','ok');
+    setTimeout(() => location.reload(), 800);
+  }} else {{
+    showRes('res-regreso','⚠ Error al guardar.','err');
+  }}
 }}
 
 // ── Guardar horas ────────────────────────────────────────────────────────
