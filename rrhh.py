@@ -489,16 +489,39 @@ def pagina():
     total_h = len(horas_con_prep)
     en_meta = sum(1 for h in horas_con_prep if h.get("efic_prep") is not None and h["efic_prep"] >= 100)
     pct_cumplimiento_prep = round((en_meta / total_h) * 100, 1) if total_h > 0 else None
-    # Desglose local vs paquetería
-    local_h   = [h for h in horas_con_prep if h.get("tipo_ruta") == "Ruta Local"]
-    paq_h     = [h for h in horas_con_prep if h.get("tipo_ruta") == "Paquetería"]
-    local_ok  = sum(1 for h in local_h if h.get("efic_prep") is not None and h["efic_prep"] >= 100)
-    paq_ok    = sum(1 for h in paq_h   if h.get("efic_prep") is not None and h["efic_prep"] >= 100)
+
+    # ALMACEN = Paquetería, todos los demás = Local
+    local_h = [h for h in horas_con_prep if h.get("colaborador","").upper() != "ALMACEN"]
+    paq_h   = [h for h in horas_con_prep if h.get("colaborador","").upper() == "ALMACEN"]
+    local_ok = sum(1 for h in local_h if h.get("efic_prep") is not None and h["efic_prep"] >= 100)
+    paq_ok   = sum(1 for h in paq_h   if h.get("efic_prep") is not None and h["efic_prep"] >= 100)
     pct_local = round((local_ok/len(local_h))*100,1) if local_h else None
     pct_paq   = round((paq_ok/len(paq_h))*100,1)    if paq_h   else None
+
+    # Promedios de tiempo real
+    def mins_a_hms(mins):
+        if mins is None: return "—"
+        h = int(mins)//60; m = int(mins)%60; s = 0
+        return f"{h:02d}:{m:02d}:00"
+
+    avg_local_mins = round(sum(h["minutos_prep"] for h in local_h)/len(local_h),1) if local_h else None
+    avg_paq_mins   = round(sum(h["minutos_prep"] for h in paq_h)/len(paq_h),1)     if paq_h   else None
+    avg_local_str  = mins_a_hms(avg_local_mins)
+    avg_paq_str    = mins_a_hms(avg_paq_mins)
+
     color_prep = ('text-emerald-400' if pct_cumplimiento_prep and pct_cumplimiento_prep>=80
                   else 'text-yellow-400' if pct_cumplimiento_prep and pct_cumplimiento_prep>=60
                   else 'text-rose-400')
+
+    # Color por fila
+    def color_pct(p):
+        if p is None: return "text-gray-400", "bg-gray-800"
+        if p >= 100: return "text-emerald-400", "bg-emerald-500"
+        if p >= 80:  return "text-yellow-400",  "bg-yellow-500"
+        return "text-rose-400", "bg-rose-500"
+
+    cl_local, bg_local = color_pct(pct_local)
+    cl_paq,   bg_paq   = color_pct(pct_paq)
 
     # Filas incidencias
     col_tipo={"Falta":"text-rose-400","Retardo":"text-orange-400","Permiso":"text-blue-400",
@@ -597,6 +620,7 @@ def pagina():
     # JSON para JS
     colabs_json=json.dumps(colaboradores)
     evals_json =json.dumps(evaluaciones)
+    MESES_ES = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"]
 
     html=f"""<!DOCTYPE html>
 <html lang="es">
@@ -628,6 +652,22 @@ input[type=range]{{accent-color:#eab308;}}
 </style>
 </head>
 <body class="text-gray-100 min-h-screen flex flex-col items-center px-2 py-3 pb-16">
+
+<!-- MODAL tarjetas equipo completo -->
+<div id="modal-equipo" class="hidden fixed inset-0 z-50 bg-gray-950/95 backdrop-blur-sm flex items-start justify-center p-4 overflow-y-auto">
+  <div class="bg-gray-900 border border-gray-800 rounded-2xl p-6 w-full max-w-5xl my-4 space-y-4">
+    <div class="flex justify-between items-center flex-wrap gap-3">
+      <h3 class="text-sm font-bold text-yellow-500 font-custom uppercase">Desempeño del Equipo</h3>
+      <div class="flex items-center gap-3">
+        <select id="equipo-mes-selector" onchange="renderTarjetasEquipo()" class="bg-gray-950 border border-gray-700 text-white text-xs rounded-lg px-3 py-1.5 outline-none focus:border-yellow-500">
+          {"".join([f'<option value="{anio}-{mes}">{MESES_ES[mes-1]} {anio}</option>' for anio,mes in sorted(set((e["anio"],e["mes"]) for e in evaluaciones), reverse=True)] if evaluaciones else ['<option>Sin datos</option>'])}
+        </select>
+        <button onclick="document.getElementById('modal-equipo').classList.add('hidden')" class="text-gray-500 hover:text-white font-bold text-xl">✕</button>
+      </div>
+    </div>
+    <div id="equipo-tarjetas-container" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4"></div>
+  </div>
+</div>
 
 <!-- MODAL actualizar hora de regreso -->
 <div id="modal-regreso" class="hidden fixed inset-0 z-50 bg-gray-950/90 backdrop-blur-sm flex items-center justify-center p-4">
@@ -663,6 +703,53 @@ input[type=range]{{accent-color:#eab308;}}
 </div>
 
 <!-- MODAL resolución de incidencia -->
+<!-- MODAL desglose tiempo preparación -->
+<div id="modal-prep" class="hidden fixed inset-0 z-50 bg-gray-950/90 backdrop-blur-sm flex items-center justify-center p-4">
+  <div class="bg-gray-900 border border-gray-800 rounded-2xl p-6 w-full max-w-lg space-y-4">
+    <div class="flex justify-between items-center">
+      <h3 class="text-sm font-bold text-amber-400 font-custom uppercase">Tiempo de Preparación</h3>
+      <button onclick="document.getElementById('modal-prep').classList.add('hidden')" class="text-gray-500 hover:text-white font-bold text-xl">✕</button>
+    </div>
+    <p class="text-[10px] text-gray-500 uppercase font-bold">Registros del período actual (últimos 80)</p>
+    <table class="w-full border-collapse text-sm">
+      <thead>
+        <tr class="bg-gray-800 text-[10px] text-gray-400 uppercase font-bold tracking-wide">
+          <th class="px-4 py-3 text-left">Entrega</th>
+          <th class="px-4 py-3 text-center">Objetivo</th>
+          <th class="px-4 py-3 text-center">Tiempo Media</th>
+          <th class="px-4 py-3 text-center">Rutas</th>
+          <th class="px-4 py-3 text-center">Puntaje</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr class="border-b border-gray-800">
+          <td class="px-4 py-3 font-bold text-white">LOCAL</td>
+          <td class="px-4 py-3 text-center text-gray-400 text-xs">&lt; 3h</td>
+          <td class="px-4 py-3 text-center font-mono font-bold text-blue-300">{avg_local_str}</td>
+          <td class="px-4 py-3 text-center text-[11px] text-gray-400">{local_ok}/{len(local_h)}</td>
+          <td class="px-4 py-3 text-center">
+            <span class="font-black text-sm px-3 py-1 rounded-lg {bg_local} text-white">{f'{pct_local}%' if pct_local is not None else '—'}</span>
+          </td>
+        </tr>
+        <tr>
+          <td class="px-4 py-3 font-bold text-white">PAQUETERÍA</td>
+          <td class="px-4 py-3 text-center text-gray-400 text-xs">&lt; 5h</td>
+          <td class="px-4 py-3 text-center font-mono font-bold text-purple-300">{avg_paq_str}</td>
+          <td class="px-4 py-3 text-center text-[11px] text-gray-400">{paq_ok}/{len(paq_h)}</td>
+          <td class="px-4 py-3 text-center">
+            <span class="font-black text-sm px-3 py-1 rounded-lg {bg_paq} text-white">{f'{pct_paq}%' if pct_paq is not None else '—'}</span>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+    <div class="bg-gray-800/50 rounded-xl p-3 text-[10px] text-gray-400 space-y-1">
+      <p>• <span class="font-bold text-white">LOCAL</span> — todos los operadores excepto ALMACEN. Meta: menos de 3h.</p>
+      <p>• <span class="font-bold text-white">PAQUETERÍA</span> — solo ALMACEN. Meta: menos de 5h.</p>
+      <p>• Tiempo medido desde <span class="text-yellow-400">Conocimiento de Ruta</span> hasta <span class="text-yellow-400">Término de Preparación</span>.</p>
+    </div>
+  </div>
+</div>
+
 <div id="modal-resolver" class="hidden fixed inset-0 z-50 bg-gray-950/90 backdrop-blur-sm flex items-center justify-center p-4">
   <div class="bg-gray-900 border border-gray-800 rounded-2xl p-6 w-full max-w-md space-y-4">
     <div class="flex justify-between items-center">
@@ -793,16 +880,24 @@ input[type=range]{{accent-color:#eab308;}}
 
 <!-- KPI CARDS -->
 <div class="w-full max-w-[1600px] grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
-  <div class="bg-gray-900/40 border border-gray-800 rounded-xl p-4 text-center shadow">
-    <p class="text-[9px] text-gray-500 uppercase font-bold tracking-wider mb-1">Promedio Global</p>
-    <p class="text-2xl font-black {'text-emerald-400' if prom_global>=80 else 'text-yellow-400' if prom_global>=60 else 'text-rose-400'} font-custom">{prom_global}%</p>
+
+  <!-- Promedio Global con selector de mes -->
+  <div class="bg-gray-900/40 border border-gray-800 rounded-xl p-4 text-center shadow space-y-1">
+    <p class="text-[9px] text-gray-500 uppercase font-bold tracking-wider">Promedio Global</p>
+    <select id="kpi-mes-selector" onchange="actualizarPromedioGlobal()" class="w-full bg-gray-950 border border-gray-700 text-white text-[10px] rounded-lg px-2 py-1 outline-none focus:border-yellow-500 text-center">
+      {"".join([f'<option value="{anio}-{mes}">{MESES_ES[mes-1]} {anio}</option>' for anio,mes in sorted(set((e["anio"],e["mes"]) for e in evaluaciones), reverse=True)] if evaluaciones else ['<option>Sin datos</option>'])}
+    </select>
+    <p id="kpi-prom-valor" class="text-2xl font-black {'text-emerald-400' if prom_global>=80 else 'text-yellow-400' if prom_global>=60 else 'text-rose-400'} font-custom">{prom_global}%</p>
+    <p id="kpi-mes-label" class="text-[9px] text-gray-500">{MESES_ES[datetime.now().month-1]} {datetime.now().year}</p>
   </div>
+
   <div class="bg-gray-900/40 border border-gray-800 rounded-xl p-4 text-center shadow">
     <p class="text-[9px] text-rose-400 uppercase font-bold tracking-wider mb-1">Incidencias Abiertas</p>
     <p class="text-2xl font-black text-rose-400 font-custom">{inc_abiertas}</p>
   </div>
-  <div class="bg-gray-900/40 border border-gray-800 rounded-xl p-4 text-center shadow col-span-2 md:col-span-1">
-    <p class="text-[9px] text-amber-400 uppercase font-bold tracking-wider mb-1">Meta Preparación</p>
+
+  <div class="card p-4 text-center shadow cursor-pointer hover:bg-rose-900/20 transition-colors col-span-2 md:col-span-1" onclick="document.getElementById('modal-prep').classList.remove('hidden')">
+    <p class="text-[9px] text-amber-400 uppercase font-bold tracking-wider mb-1">Meta Preparación <span class="text-[8px] text-gray-600">(clic para desglose)</span></p>
     <p class="text-2xl font-black {color_prep} font-custom">{f'{pct_cumplimiento_prep}%' if pct_cumplimiento_prep is not None else '—'}</p>
     <div class="flex justify-center gap-3 mt-1.5">
       <span class="text-[9px] text-gray-500">🚐 Local: <span class="font-bold text-blue-400">{f'{pct_local}%' if pct_local is not None else '—'}</span></span>
@@ -810,9 +905,12 @@ input[type=range]{{accent-color:#eab308;}}
     </div>
     <p class="text-[8px] text-gray-600 mt-1">Rutas en tiempo (3h local / 5h paq)</p>
   </div>
-  <div class="bg-gray-900/40 border border-gray-800 rounded-xl p-4 text-center shadow">
-    <p class="text-[9px] text-emerald-400 uppercase font-bold tracking-wider mb-1">Rutas Óptimas</p>
-    <p class="text-2xl font-black text-emerald-400 font-custom">{pct_optimos}%</p>
+
+  <!-- Rutas Óptimas → abre tarjetas de colaboradores -->
+  <div class="bg-gray-900/40 border border-gray-800 rounded-xl p-4 text-center shadow cursor-pointer hover:bg-gray-900/60 transition-colors" onclick="abrirTarjetasColaboradores()">
+    <p class="text-[9px] text-emerald-400 uppercase font-bold tracking-wider mb-1">Desempeño del Equipo <span class="text-[8px] text-gray-600">(clic)</span></p>
+    <p class="text-2xl font-black text-emerald-400 font-custom">{prom_global}%</p>
+    <p class="text-[9px] text-gray-500 mt-1">Ver tarjetas individuales</p>
   </div>
 </div>
 
@@ -1255,6 +1353,100 @@ const HORAS_DATA       = {json.dumps(horas)};
 const ACTIVIDADES_HORAS = {json.dumps(ACTIVIDADES_HORAS)};
 const META_LOCAL = {META_LOCAL};
 const META_PAQ   = {META_PAQ};
+const COLABS_DATA = COLABS;
+const EVALS_DATA  = EVALS;
+const MESES_ES_JS = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
+
+// ── Promedio Global por mes ───────────────────────────────────────────────
+function actualizarPromedioGlobal() {{
+  const sel = document.getElementById('kpi-mes-selector').value;
+  if (!sel || sel === 'Sin datos') return;
+  const [anio, mes] = sel.split('-').map(Number);
+  const evsMes = EVALS_DATA.filter(e => e.anio === anio && e.mes === mes);
+  const prom = evsMes.length > 0
+    ? Math.round(evsMes.reduce((a,b) => a + b.pct, 0) / evsMes.length * 10) / 10
+    : 0;
+  const el = document.getElementById('kpi-prom-valor');
+  el.innerText = prom + '%';
+  el.className = 'text-2xl font-black font-custom ' + (prom>=80?'text-emerald-400':prom>=60?'text-yellow-400':'text-rose-400');
+  document.getElementById('kpi-mes-label').innerText = MESES_ES_JS[mes-1] + ' ' + anio;
+}}
+
+// ── Tarjetas equipo ───────────────────────────────────────────────────────
+function abrirTarjetasColaboradores() {{
+  document.getElementById('modal-equipo').classList.remove('hidden');
+  renderTarjetasEquipo();
+}}
+
+function renderTarjetasEquipo() {{
+  const sel = document.getElementById('equipo-mes-selector').value;
+  if (!sel || sel === 'Sin datos') return;
+  const [anio, mes] = sel.split('-').map(Number);
+  const container = document.getElementById('equipo-tarjetas-container');
+  container.innerHTML = '<p class="text-center text-gray-500 text-xs py-4 col-span-3">Calculando...</p>';
+
+  setTimeout(() => {{
+    container.innerHTML = '';
+    COLABS_DATA.forEach(colab => {{
+      const evsMes = EVALS_DATA.filter(e => e.colaborador === colab.nombre && e.anio === anio && e.mes === mes);
+      if (evsMes.length === 0) return;
+      const actMap = {{}};
+      evsMes.forEach(e => {{
+        if (e.calificaciones) Object.entries(e.calificaciones).forEach(([act, val]) => {{
+          if (!actMap[act]) actMap[act] = [];
+          actMap[act].push(val);
+        }});
+      }});
+      const actProms = Object.entries(actMap).map(([act, vals]) => ({{
+        act, pct: Math.round((vals.reduce((a,b)=>a+b,0)/vals.length/5)*100)
+      }})).sort((a,b) => b.pct - a.pct);
+      const promTotal = actProms.length > 0
+        ? Math.round(actProms.reduce((a,b)=>a+b.pct,0)/actProms.length)
+        : 0;
+      const colorTotal = promTotal>=80?'text-emerald-400':promTotal>=60?'text-yellow-400':'text-rose-400';
+      const filasActs = actProms.map(a => {{
+        const c = a.pct>=80?'text-emerald-400':a.pct>=60?'text-yellow-400':'text-rose-400';
+        return `<tr class="border-b border-gray-800/50">
+          <td class="py-1.5 pr-3 text-[10px] text-gray-300 uppercase">${{a.act}}</td>
+          <td class="py-1.5 text-right font-black text-[11px] ${{c}}">${{a.pct}}%</td>
+        </tr>`;
+      }}).join('');
+      container.innerHTML += `
+      <div class="bg-gray-900/60 border border-gray-700 rounded-2xl p-4 space-y-3">
+        <div class="flex items-center gap-3">
+          <img src="/static/fotos/${{colab.nombre}}.jpg"
+            onerror="this.style.display='none';this.nextElementSibling.style.display='flex'"
+            class="w-16 h-16 rounded-full object-cover border-2 border-yellow-500/40 shrink-0">
+          <div class="w-16 h-16 rounded-full bg-yellow-500/10 border-2 border-yellow-500/30 items-center justify-center text-yellow-500 font-black text-2xl shrink-0" style="display:none">${{colab.nombre[0]}}</div>
+          <div class="flex-1 min-w-0">
+            <p class="font-black text-white text-sm uppercase leading-tight">${{colab.nombre}}</p>
+            <p class="text-[10px] text-gray-400 font-bold uppercase">${{colab.puesto}}</p>
+            <p class="text-[10px] text-yellow-500">${{MESES_ES_JS[mes-1]}} ${{anio}}</p>
+          </div>
+          <div class="text-right shrink-0">
+            <p class="text-[9px] text-gray-500 uppercase font-bold">TOTAL</p>
+            <p class="text-2xl font-black ${{colorTotal}} font-custom">${{promTotal}}%</p>
+          </div>
+        </div>
+        <table class="w-full border-collapse">
+          <thead><tr class="border-b border-gray-700">
+            <th class="text-left text-[9px] text-gray-500 uppercase font-bold py-1">Actividad</th>
+            <th class="text-right text-[9px] text-gray-500 uppercase font-bold py-1">Puntaje</th>
+          </tr></thead>
+          <tbody>${{filasActs}}</tbody>
+        </table>
+        <div class="flex gap-2 text-[9px] flex-wrap pt-1 border-t border-gray-800">
+          <span class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded-full font-bold">≥80% Excelente</span>
+          <span class="bg-blue-500/10 text-blue-400 border border-blue-500/20 px-2 py-0.5 rounded-full font-bold">60-79% En observación</span>
+          <span class="bg-rose-500/10 text-rose-400 border border-rose-500/20 px-2 py-0.5 rounded-full font-bold">&lt;60% Crítico</span>
+        </div>
+      </div>`;
+    }});
+    if (!container.innerHTML) {{
+      container.innerHTML = '<p class="text-center text-gray-500 text-xs py-8 col-span-3">No hay evaluaciones para este mes.</p>';
+    }}
+  }}, 50);
+}}
 
 // ── Importar Excel masivo ─────────────────────────────────────────────────
 async function importarExcel() {{
