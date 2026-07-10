@@ -1,9 +1,9 @@
 from fastapi import FastAPI, HTTPException, UploadFile, File
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import Optional, List, Dict
-import json, os
+import json, os, io
 from datetime import datetime
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -209,6 +209,228 @@ def guardar_eval(e: EvalDia):
              datetime.now().strftime("%d/%m/%Y %H:%M"),
              json.dumps(e.calificaciones), promedio, pct, datetime.now().strftime("%d/%m/%Y %H:%M")))
     return {"ok":True,"pct":pct}
+
+@app.get("/api/exportar-evaluaciones")
+def exportar_evaluaciones(anio: int, mes: int):
+    import openpyxl
+    from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    MESES_ES = ["Enero","Febrero","Marzo","Abril","Mayo","Junio",
+                "Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"]
+    nombre_mes = MESES_ES[mes-1]
+
+    colaboradores = db_fetch("SELECT * FROM colaboradores ORDER BY nombre")
+    for c in colaboradores:
+        if isinstance(c.get("actividades"), str):
+            c["actividades"] = json.loads(c["actividades"])
+
+    evals = db_fetch("""SELECT * FROM evaluaciones WHERE anio=%s AND mes=%s ORDER BY colaborador, dia""",
+                     (anio, mes))
+    for e in evals:
+        if isinstance(e.get("calificaciones"), str):
+            e["calificaciones"] = json.loads(e["calificaciones"])
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = f"Evaluaciones {nombre_mes} {anio}"
+
+    # Estilos
+    def estilo_header(fill_color="1a1a2e", font_color="FFFFFF", bold=True, size=11):
+        return {
+            "fill": PatternFill("solid", fgColor=fill_color),
+            "font": Font(color=font_color, bold=bold, size=size, name="Calibri"),
+            "alignment": Alignment(horizontal="center", vertical="center", wrap_text=True),
+            "border": Border(
+                left=Side(style="thin", color="888888"),
+                right=Side(style="thin", color="888888"),
+                top=Side(style="thin", color="888888"),
+                bottom=Side(style="thin", color="888888")
+            )
+        }
+
+    def aplicar_estilo(cell, **kwargs):
+        for k, v in kwargs.items():
+            setattr(cell, k, v)
+
+    def color_pct(pct):
+        if pct >= 80: return "1a7a4a"
+        if pct >= 60: return "b45309"
+        return "991b1b"
+
+    fila = 1
+
+    # ── TÍTULO ────────────────────────────────────────────────────────────
+    ws.merge_cells(f"A{fila}:H{fila}")
+    cell = ws.cell(fila, 1, f"LUQROSS AUTOMOTRIZ — EVALUACIONES {nombre_mes.upper()} {anio}")
+    aplicar_estilo(cell, **estilo_header("0f172a", "f8fafc", bold=True, size=14))
+    ws.row_dimensions[fila].height = 30
+    fila += 2
+
+    # ── SECCIÓN 1: RESUMEN DEL MES ────────────────────────────────────────
+    ws.merge_cells(f"A{fila}:H{fila}")
+    cell = ws.cell(fila, 1, f"RESUMEN DEL MES — {nombre_mes.upper()} {anio}")
+    aplicar_estilo(cell, **estilo_header("1e3a5f", "93c5fd", bold=True, size=12))
+    ws.row_dimensions[fila].height = 22
+    fila += 1
+
+    # Headers resumen
+    headers_res = ["Colaborador","Puesto","Días Evaluados","Promedio Global %","Mejor Actividad","Actividad con menor pct","Incidencias"]
+    for col, h in enumerate(headers_res, 1):
+        cell = ws.cell(fila, col, h)
+        aplicar_estilo(cell, **estilo_header("1e40af", "dbeafe"))
+        ws.column_dimensions[get_column_letter(col)].width = 22
+    ws.row_dimensions[fila].height = 18
+    fila += 1
+
+    for colab in colaboradores:
+        evals_colab = [e for e in evals if e["colaborador"] == colab["nombre"]]
+        if not evals_colab:
+            continue
+        dias = len(evals_colab)
+        # Promedios por actividad
+        act_map = {}
+        for e in evals_colab:
+            for act, val in (e.get("calificaciones") or {}).items():
+                if act not in act_map: act_map[act] = []
+                act_map[act].append(val)
+        act_promedios = {a: round(sum(v)/len(v)/5*100,1) for a,v in act_map.items()}
+        prom_global = round(sum(act_promedios.values())/len(act_promedios),1) if act_promedios else 0
+        mejor = max(act_promedios, key=act_promedios.get) if act_promedios else "—"
+        peor  = min(act_promedios, key=act_promedios.get) if act_promedios else "—"
+        incidencias = db_fetch("SELECT COUNT(*) as c FROM incidencias WHERE colaborador=%s", (colab["nombre"],))
+        n_inc = incidencias[0]["c"] if incidencias else 0
+
+        vals = [colab["nombre"], colab.get("puesto",""), dias, f"{prom_global}%",
+                f"{mejor} ({act_promedios.get(mejor,0):.0f}%)",
+                f"{peor} ({act_promedios.get(peor,0):.0f}%)", n_inc]
+        for col, v in enumerate(vals, 1):
+            cell = ws.cell(fila, col, v)
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+            cell.border = Border(
+                left=Side(style="thin", color="cccccc"),
+                right=Side(style="thin", color="cccccc"),
+                top=Side(style="thin", color="cccccc"),
+                bottom=Side(style="thin", color="cccccc")
+            )
+            if col == 1:
+                cell.font = Font(bold=True, name="Calibri")
+            if col == 4:
+                color = color_pct(prom_global)
+                cell.fill = PatternFill("solid", fgColor=color)
+                cell.font = Font(bold=True, color="FFFFFF", name="Calibri")
+        fila += 1
+
+    fila += 2
+
+    # ── SECCIÓN 2: DETALLE DÍA A DÍA ─────────────────────────────────────
+    ws.merge_cells(f"A{fila}:H{fila}")
+    cell = ws.cell(fila, 1, f"DETALLE DÍA A DÍA — {nombre_mes.upper()} {anio}")
+    aplicar_estilo(cell, **estilo_header("1e3a5f", "93c5fd", bold=True, size=12))
+    ws.row_dimensions[fila].height = 22
+    fila += 1
+
+    for colab in colaboradores:
+        evals_colab = sorted([e for e in evals if e["colaborador"] == colab["nombre"]], key=lambda x: x["dia"])
+        if not evals_colab: continue
+
+        # Header colaborador
+        ws.merge_cells(f"A{fila}:H{fila}")
+        cell = ws.cell(fila, 1, f"{colab['nombre']} — {colab.get('puesto','')}")
+        aplicar_estilo(cell, **estilo_header("0f4c81", "e0f2fe", bold=True, size=11))
+        ws.row_dimensions[fila].height = 20
+        fila += 1
+
+        # Obtener todas las actividades del colaborador
+        actividades = colab.get("actividades", [])
+        if not actividades:
+            for e in evals_colab:
+                actividades = list((e.get("calificaciones") or {}).keys())
+                if actividades: break
+
+        # Header tabla: Actividad | Día 1 | Día 2 | ... | Promedio
+        dias_eval = sorted(set(e["dia"] for e in evals_colab))
+        headers = ["Actividad"] + [f"Día {d}" for d in dias_eval] + ["Promedio %"]
+        for col, h in enumerate(headers, 1):
+            cell = ws.cell(fila, col, h)
+            aplicar_estilo(cell, **estilo_header("1e40af", "dbeafe"))
+            ws.column_dimensions[get_column_letter(col)].width = max(
+                ws.column_dimensions[get_column_letter(col)].width or 0,
+                len(h) + 4
+            )
+        ws.column_dimensions["A"].width = 35
+        ws.row_dimensions[fila].height = 16
+        fila += 1
+
+        # Filas por actividad
+        for act in actividades:
+            row_vals = [act]
+            vals_act = []
+            for dia in dias_eval:
+                eval_dia = next((e for e in evals_colab if e["dia"] == dia), None)
+                val = (eval_dia.get("calificaciones") or {}).get(act, "") if eval_dia else ""
+                row_vals.append(val)
+                if val != "": vals_act.append(val)
+            prom_act = round(sum(vals_act)/len(vals_act)/5*100,1) if vals_act else 0
+            row_vals.append(f"{prom_act}%" if vals_act else "—")
+
+            for col, v in enumerate(row_vals, 1):
+                cell = ws.cell(fila, col, v)
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+                cell.border = Border(
+                    left=Side(style="thin", color="dddddd"),
+                    right=Side(style="thin", color="dddddd"),
+                    top=Side(style="thin", color="dddddd"),
+                    bottom=Side(style="thin", color="dddddd")
+                )
+                if col == 1:
+                    cell.alignment = Alignment(horizontal="left", vertical="center")
+                    cell.font = Font(bold=True, size=9, name="Calibri")
+                elif col == len(row_vals):  # Promedio
+                    color = color_pct(prom_act)
+                    cell.fill = PatternFill("solid", fgColor=color)
+                    cell.font = Font(bold=True, color="FFFFFF", size=9, name="Calibri")
+                elif v != "" and isinstance(v, (int, float)):
+                    # Color por calificación
+                    colors_cal = {5:"166534",4:"1a7a4a",3:"854d0e",2:"9a3412",1:"991b1b",0:"7f1d1d"}
+                    bg = colors_cal.get(int(v), "374151")
+                    cell.fill = PatternFill("solid", fgColor=bg)
+                    cell.font = Font(bold=True, color="FFFFFF", size=9, name="Calibri")
+            fila += 1
+
+        # Fila de promedio diario
+        row_prom = ["PROMEDIO DÍA %"]
+        for dia in dias_eval:
+            eval_dia = next((e for e in evals_colab if e["dia"] == dia), None)
+            if eval_dia:
+                row_prom.append(f"{eval_dia.get('pct',0):.0f}%")
+            else:
+                row_prom.append("—")
+        prom_mes_colab = round(sum(e.get("pct",0) for e in evals_colab)/len(evals_colab),1)
+        row_prom.append(f"{prom_mes_colab}%")
+        for col, v in enumerate(row_prom, 1):
+            cell = ws.cell(fila, col, v)
+            aplicar_estilo(cell, **estilo_header("0f766e", "ccfbf1"))
+            if col > 1:
+                try:
+                    pct_val = float(v.replace("%",""))
+                    color = color_pct(pct_val)
+                    cell.fill = PatternFill("solid", fgColor=color)
+                    cell.font = Font(bold=True, color="FFFFFF", name="Calibri")
+                except: pass
+        fila += 2
+
+    # Guardar en buffer
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+
+    nombre_archivo = f"Evaluaciones_LUQROSS_{nombre_mes}_{anio}.xlsx"
+    return StreamingResponse(
+        buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={nombre_archivo}"}
+    )
 
 @app.get("/api/evaluaciones/{nombre}/{anio}/{mes}")
 def get_eval_mes(nombre:str,anio:int,mes:int):
@@ -889,6 +1111,9 @@ input[type=range]{{accent-color:#eab308;}}
     </select>
     <p id="kpi-prom-valor" class="text-2xl font-black {'text-emerald-400' if prom_global>=80 else 'text-yellow-400' if prom_global>=60 else 'text-rose-400'} font-custom">{prom_global}%</p>
     <p id="kpi-mes-label" class="text-[9px] text-gray-500">{MESES_ES[datetime.now().month-1]} {datetime.now().year}</p>
+    <button onclick="descargarExcelEval()" class="w-full mt-1 bg-emerald-700 hover:bg-emerald-600 text-white font-black text-[9px] py-1.5 rounded-lg uppercase font-custom tracking-wide transition-colors">
+      📥 Descargar Excel
+    </button>
   </div>
 
   <div class="bg-gray-900/40 border border-gray-800 rounded-xl p-4 text-center shadow">
@@ -1356,6 +1581,29 @@ const META_PAQ   = {META_PAQ};
 const COLABS_DATA = COLABS;
 const EVALS_DATA  = EVALS;
 const MESES_ES_JS = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
+
+// ── Descargar Excel evaluaciones ──────────────────────────────────────────
+async function descargarExcelEval() {{
+  const sel = document.getElementById('kpi-mes-selector').value;
+  if (!sel || sel === 'Sin datos') {{ alert('Selecciona un mes primero.'); return; }}
+  const [anio, mes] = sel.split('-');
+  const btn = document.querySelector('[onclick="descargarExcelEval()"]');
+  const textoOriginal = btn.innerText;
+  btn.innerText = '⏳ Generando...'; btn.disabled = true;
+  try {{
+    const r = await fetch(`/api/exportar-evaluaciones?anio=${{anio}}&mes=${{mes}}`);
+    if (!r.ok) {{ alert('Error al generar el Excel.'); return; }}
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `Evaluaciones_LUQROSS_${{MESES_ES_JS[parseInt(mes)-1]}}_${{anio}}.xlsx`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }} finally {{
+    btn.innerText = textoOriginal; btn.disabled = false;
+  }}
+}}
 
 // ── Promedio Global por mes ───────────────────────────────────────────────
 function actualizarPromedioGlobal() {{
