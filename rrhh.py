@@ -131,6 +131,21 @@ def db_exec(sql, params=()):
     cur.close(); conn.close()
     return dict(result) if result else None
 
+def parse_colabs(raw):
+    """Devuelve la lista de colaboradores involucrados en una incidencia.
+    Soporta el formato nuevo (lista JSON, ej. '["ANA","LUIS"]') y el formato
+    antiguo de un solo nombre en texto plano, para no romper incidencias ya
+    guardadas antes de este cambio."""
+    if not raw:
+        return []
+    try:
+        v = json.loads(raw)
+        if isinstance(v, list):
+            return [str(x) for x in v if str(x).strip()]
+    except Exception:
+        pass
+    return [raw]
+
 # ── Modelos ────────────────────────────────────────────────────────────────
 class Colaborador(BaseModel):
     nombre: str
@@ -145,7 +160,7 @@ class EvalDia(BaseModel):
     calificaciones: Dict[str, int]
 
 class Incidencia(BaseModel):
-    colaborador: str
+    colaboradores: List[str]
     tipo: str
     tipo_personalizado: Optional[str] = ""
     responsable: str
@@ -231,6 +246,12 @@ def exportar_evaluaciones(anio: int, mes: int):
         if isinstance(e.get("calificaciones"), str):
             e["calificaciones"] = json.loads(e["calificaciones"])
 
+    # Conteo de incidencias por colaborador (una incidencia puede involucrar a varios)
+    inc_por_colab = {}
+    for row in db_fetch("SELECT colaborador FROM incidencias"):
+        for nombre in parse_colabs(row.get("colaborador")):
+            inc_por_colab[nombre] = inc_por_colab.get(nombre, 0) + 1
+
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = f"Evaluaciones {nombre_mes} {anio}"
@@ -298,8 +319,7 @@ def exportar_evaluaciones(anio: int, mes: int):
         prom_global = round(sum(act_promedios.values())/len(act_promedios),1) if act_promedios else 0
         mejor = max(act_promedios, key=act_promedios.get) if act_promedios else "—"
         peor  = min(act_promedios, key=act_promedios.get) if act_promedios else "—"
-        incidencias = db_fetch("SELECT COUNT(*) as c FROM incidencias WHERE colaborador=%s", (colab["nombre"],))
-        n_inc = incidencias[0]["c"] if incidencias else 0
+        n_inc = inc_por_colab.get(colab["nombre"], 0)
 
         vals = [colab["nombre"], colab.get("puesto",""), dias, f"{prom_global}%",
                 f"{mejor} ({act_promedios.get(mejor,0):.0f}%)",
@@ -561,10 +581,13 @@ async def importar_excel(file: UploadFile = File(...)):
 # ── API incidencias ────────────────────────────────────────────────────────
 @app.post("/api/incidencia")
 def guardar_inc(i:Incidencia):
+    colabs = [c.strip() for c in i.colaboradores if c and c.strip()]
+    if not colabs:
+        raise HTTPException(status_code=400, detail="Selecciona al menos un colaborador.")
     tipo_final = i.tipo_personalizado.strip() if i.tipo == "Otro" and i.tipo_personalizado else i.tipo
     r = db_exec("""INSERT INTO incidencias (fecha,colaborador,tipo,responsable,ingresado_por,observaciones,estatus)
                    VALUES (%s,%s,%s,%s,%s,%s,'Abierta') RETURNING id""",
-                (datetime.now().strftime("%d/%m/%Y %H:%M"), i.colaborador, tipo_final,
+                (datetime.now().strftime("%d/%m/%Y %H:%M"), json.dumps(colabs), tipo_final,
                  i.responsable, i.ingresado_por, i.observaciones))
     return {"ok":True, "id": r["id"] if r else 0}
 
@@ -687,6 +710,8 @@ def pagina():
             e["calificaciones"] = json.loads(e["calificaciones"])
 
     incidencias = db_fetch("SELECT * FROM incidencias ORDER BY id DESC")
+    for inc in incidencias:
+        inc["colaboradores"] = parse_colabs(inc.get("colaborador"))
 
     tiempos = db_fetch("SELECT * FROM tiempos ORDER BY id DESC")
 
@@ -699,6 +724,7 @@ def pagina():
 
     logo_html=f'<img src="/static/{LOGO_FILE}" alt="LUQROSS" class="w-28 h-auto object-contain block mr-4 select-none">' if os.path.exists(f"static/{LOGO_FILE}") else ""
     opts_colab="".join([f'<option value="{c["nombre"]}">{c["nombre"]}</option>' for c in colaboradores])
+    opts_colab_chk="".join([f'<label class="flex items-center gap-2 text-[11px] text-gray-300 hover:text-white cursor-pointer"><input type="checkbox" class="inc-colab-chk accent-rose-500" value="{c["nombre"]}"> {c["nombre"]}</label>' for c in colaboradores]) or '<p class="text-[10px] text-gray-600">No hay colaboradores registrados.</p>'
 
     # KPI cards globales
     total_eval=len(set((e["colaborador"],e["anio"],e["mes"]) for e in evaluaciones))
@@ -755,6 +781,7 @@ def pagina():
         filas_inc='<tr><td colspan="7" class="p-5 text-center text-xs text-gray-500">No hay incidencias registradas.</td></tr>'
     else:
         for inc in reversed(incidencias):
+            nombres_inc=", ".join(inc.get("colaboradores") or [])
             ct=col_tipo.get(inc["tipo"],"text-gray-400")
             est_badge=('bg-emerald-500/10 text-emerald-400 border-emerald-500/20' if inc["estatus"]=="Resuelta"
                        else 'bg-rose-500/10 text-rose-400 border-rose-500/20')
@@ -769,7 +796,7 @@ def pagina():
                 foto_html='<span class="text-gray-700 text-[10px]">—</span>'
             filas_inc+=f"""<tr class="border-b border-gray-800 hover:bg-gray-900/30 text-xs transition-colors" data-ingresado="{inc.get('ingresado_por','')}">
                 <td class="px-3 py-2.5 font-mono text-gray-400 text-[10px]">{inc['fecha']}</td>
-                <td class="px-3 py-2.5 font-bold text-white uppercase">{inc['colaborador']}</td>
+                <td class="px-3 py-2.5 font-bold text-white uppercase">{nombres_inc}</td>
                 <td class="px-3 py-2.5 font-bold {ct}">{inc['tipo']}</td>
                 <td class="px-3 py-2.5 text-gray-500 text-[10px]">{inc['responsable']}</td>
                 <td class="px-3 py-2.5 text-gray-500 text-[10px] italic max-w-[150px] truncate">{inc.get('observaciones','')}</td>
@@ -1230,7 +1257,10 @@ input[type=range]{{accent-color:#eab308;}}
           <option>VICTOR</option>
         </select>
       </div>
-      <div><label class="lbl">Colaborador Involucrado</label><select id="inc-colab" class="field"><option value="">-- Selecciona --</option>{opts_colab}</select></div>
+      <div>
+        <label class="lbl">Colaboradores Involucrados</label>
+        <div id="inc-colab-box" class="field" style="max-height:140px;overflow-y:auto;display:flex;flex-direction:column;gap:6px;">{opts_colab_chk}</div>
+      </div>
       <div>
         <label class="lbl">Tipo de Incidencia</label>
         <select id="inc-tipo" onchange="toggleTipoPersonalizado()" class="field">
@@ -2174,16 +2204,16 @@ async function confirmarResolucion() {{
 // ── Guardar incidencia ────────────────────────────────────────────────────
 async function guardarInc() {{
   const ingresadoPor = document.getElementById('inc-ingresado-por').value;
-  const colab = document.getElementById('inc-colab').value;
+  const colabs = Array.from(document.querySelectorAll('.inc-colab-chk:checked')).map(el=>el.value);
   const resp  = document.getElementById('inc-resp').value.trim();
   const tipo  = document.getElementById('inc-tipo').value;
   const tipoCustom = document.getElementById('inc-tipo-custom')?.value.trim() || '';
   if (!ingresadoPor) {{ showRes('res-inc','⚠ Selecciona quién ingresa la incidencia.','err'); return; }}
-  if (!colab || !resp) {{ showRes('res-inc','⚠ Completa colaborador y responsable.','err'); return; }}
+  if (!colabs.length || !resp) {{ showRes('res-inc','⚠ Selecciona al menos un colaborador y completa el responsable.','err'); return; }}
   if (tipo === 'Otro' && !tipoCustom) {{ showRes('res-inc','⚠ Especifica el tipo de incidencia.','err'); return; }}
 
   const payload = {{
-    colaborador: colab, tipo, tipo_personalizado: tipoCustom,
+    colaboradores: colabs, tipo, tipo_personalizado: tipoCustom,
     responsable: resp, ingresado_por: ingresadoPor,
     observaciones: document.getElementById('inc-obs').value
   }};
@@ -2431,7 +2461,7 @@ function renderKpiCharts(){{
     cardsDiv.style.display='grid';
     const dias=evFilt.length;
     const prom=(evFilt.reduce((a,b)=>a+b.pct,0)/dias).toFixed(1);
-    const incCount=INCIDENCIAS_DATA.filter(i=>i.colaborador===colabSel).length;
+    const incCount=INCIDENCIAS_DATA.filter(i=>(i.colaboradores||[]).includes(colabSel)).length;
     // Mejor actividad
     const actTotals={{}};
     evFilt.forEach(e=>Object.entries(e.calificaciones).forEach(([k,v])=>{{
@@ -2593,9 +2623,9 @@ function renderKpiCharts(){{
 
   // ── Gráfica 3: Incidencias por colaborador ───────────────────────────
   let incFilt=INCIDENCIAS_DATA;
-  if(colabSel) incFilt=incFilt.filter(i=>i.colaborador===colabSel);
+  if(colabSel) incFilt=incFilt.filter(i=>(i.colaboradores||[]).includes(colabSel));
   const incMap={{}};
-  incFilt.forEach(i=>{{incMap[i.colaborador]=(incMap[i.colaborador]||0)+1;}});
+  incFilt.forEach(i=>{{(i.colaboradores||[]).forEach(nombre=>{{incMap[nombre]=(incMap[nombre]||0)+1;}});}});
   const iL=Object.keys(incMap).length?Object.keys(incMap):['Sin datos'];
   const iD=iL.map(l=>incMap[l]||0);
 
