@@ -1,9 +1,9 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException, UploadFile, File, Request
+from fastapi.responses import HTMLResponse, StreamingResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import Optional, List, Dict
-import json, os, io
+import json, os, io, base64, secrets
 from datetime import datetime
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -14,6 +14,30 @@ for d in ["static", "static/fotos", "static/incidencias"]:
     os.makedirs(d, exist_ok=True)
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# ── Acceso con usuario/contraseña ───────────────────────────────────────────
+# Configúralos en Railway → Variables (APP_USER / APP_PASSWORD). Si no los
+# configuras, se usan estos valores por defecto — cámbialos en cuanto puedas,
+# cualquiera que sepa esto puede entrar a ver los datos del equipo.
+APP_USER     = os.environ.get("APP_USER", "luqross")
+APP_PASSWORD = os.environ.get("APP_PASSWORD", "almacen2026")
+
+@app.middleware("http")
+async def proteger_con_login(request: Request, call_next):
+    no_autorizado = Response(
+        status_code=401,
+        headers={"WWW-Authenticate": 'Basic realm="LUQROSS Automotriz"'},
+    )
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Basic "):
+        return no_autorizado
+    try:
+        usuario, _, clave = base64.b64decode(auth[6:]).decode("utf-8").partition(":")
+    except Exception:
+        return no_autorizado
+    if not (secrets.compare_digest(usuario, APP_USER) and secrets.compare_digest(clave, APP_PASSWORD)):
+        return no_autorizado
+    return await call_next(request)
 
 FONT_FILE  = "Strasua.ttf"
 LOGO_FILE  = "logo.png"
@@ -273,6 +297,28 @@ def guardar_eval(e: EvalDia):
              datetime.now().strftime("%d/%m/%Y %H:%M"),
              json.dumps(e.calificaciones), promedio, pct, datetime.now().strftime("%d/%m/%Y %H:%M")))
     return {"ok":True,"pct":pct}
+
+# ── Respaldo completo ────────────────────────────────────────────────────────
+@app.get("/api/backup")
+def backup():
+    """Descarga un JSON con todo lo guardado en la base de datos (colaboradores,
+    evaluaciones, incidencias, horas y tiempos), por si algo falla en Railway
+    o necesitas recuperar información."""
+    datos = {
+        "generado": datetime.now().strftime("%d/%m/%Y %H:%M"),
+        "colaboradores": db_fetch("SELECT * FROM colaboradores ORDER BY nombre"),
+        "evaluaciones": db_fetch("SELECT * FROM evaluaciones ORDER BY anio,mes,dia"),
+        "incidencias": db_fetch("SELECT * FROM incidencias ORDER BY id"),
+        "horas": db_fetch("SELECT * FROM horas ORDER BY id"),
+        "tiempos": db_fetch("SELECT * FROM tiempos ORDER BY id"),
+    }
+    contenido = json.dumps(datos, indent=2, ensure_ascii=False, default=str)
+    nombre_archivo = f"respaldo_luqross_{datetime.now().strftime('%Y%m%d_%H%M')}.json"
+    return Response(
+        content=contenido,
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{nombre_archivo}"'},
+    )
 
 @app.get("/api/exportar-evaluaciones")
 def exportar_evaluaciones(anio: int, mes: int):
@@ -1162,8 +1208,9 @@ input[type=range]{{accent-color:#eab308;}}
 <!-- MODAL agregar/editar colaborador -->
 <div id="modal-colab" class="hidden fixed inset-0 z-50 bg-gray-950/90 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
   <div class="bg-gray-900 border border-gray-800 rounded-2xl p-6 w-full max-w-lg space-y-4 my-4">
-    <div class="flex justify-between"><h3 class="text-xs font-bold text-yellow-500 font-custom uppercase">Agregar Colaborador</h3><button onclick="document.getElementById('modal-colab').classList.add('hidden')" class="text-gray-500 hover:text-white font-bold">✕</button></div>
+    <div class="flex justify-between"><h3 id="modal-colab-titulo" class="text-xs font-bold text-yellow-500 font-custom uppercase">Agregar Colaborador</h3><button onclick="document.getElementById('modal-colab').classList.add('hidden')" class="text-gray-500 hover:text-white font-bold">✕</button></div>
     <div class="space-y-3">
+      <input type="hidden" id="col-editando" value="">
       <div><label class="lbl">Nombre Completo</label><input id="col-nombre" class="field" placeholder="Ej. Juan Pérez"></div>
       <div>
         <label class="lbl">Tipo de Puesto (puedes marcar varios)</label>
@@ -1179,7 +1226,7 @@ input[type=range]{{accent-color:#eab308;}}
         <label class="lbl">Actividades a Evaluar (una por línea)</label>
         <textarea id="col-actividades" rows="8" class="field resize-none" placeholder="ETIQUETADO CORRECTO&#10;PRODUCTO CORRECTO&#10;PREPARACIÓN DE PEDIDO&#10;..."></textarea>
       </div>
-      <button onclick="guardarColab()" class="w-full bg-yellow-500 hover:bg-yellow-400 text-gray-950 font-black py-2.5 rounded-xl text-xs uppercase font-custom tracking-wider transition-colors">Agregar Colaborador</button>
+      <button id="btn-guardar-colab" onclick="guardarColab()" class="w-full bg-yellow-500 hover:bg-yellow-400 text-gray-950 font-black py-2.5 rounded-xl text-xs uppercase font-custom tracking-wider transition-colors">Agregar Colaborador</button>
       <div id="res-colab" class="hidden p-2 text-center text-xs font-bold rounded-xl"></div>
     </div>
   </div>
@@ -1193,12 +1240,15 @@ input[type=range]{{accent-color:#eab308;}}
       <p class="text-[10px] text-gray-500 tracking-widest font-bold uppercase mt-0.5">Gestión de Personal — Evaluaciones & KPIs</p>
     </div>
   </div>
-  <div class="flex border-b border-gray-800 bg-gray-950/20 rounded-t-xl px-2 gap-1 overflow-x-auto self-end">
-    <button onclick="switchTab('evaluacion')" id="btn-evaluacion" class="tab-btn">EVALUACIÓN DIARIA</button>
-    <button onclick="switchTab('incidencias')" id="btn-incidencias" class="tab-btn">INCIDENCIAS</button>
-    <button onclick="switchTab('kpi')" id="btn-kpi" class="tab-btn">KPIs</button>
-    <button onclick="switchTab('horas')" id="btn-horas" class="tab-btn">REGISTRO DE HORAS</button>
-    <button onclick="switchTab('colaboradores')" id="btn-colaboradores" class="tab-btn">COLABORADORES</button>
+  <div class="flex items-center gap-2 self-end">
+    <a href="/api/backup" title="Descarga un respaldo completo de todos tus datos (colaboradores, evaluaciones, incidencias, horas)" class="text-[10px] text-gray-500 hover:text-yellow-500 font-bold uppercase transition-colors border border-gray-800 rounded-lg px-3 py-1.5 whitespace-nowrap">💾 Respaldo</a>
+    <div class="flex border-b border-gray-800 bg-gray-950/20 rounded-t-xl px-2 gap-1 overflow-x-auto">
+      <button onclick="switchTab('evaluacion')" id="btn-evaluacion" class="tab-btn">EVALUACIÓN DIARIA</button>
+      <button onclick="switchTab('incidencias')" id="btn-incidencias" class="tab-btn">INCIDENCIAS</button>
+      <button onclick="switchTab('kpi')" id="btn-kpi" class="tab-btn">KPIs</button>
+      <button onclick="switchTab('horas')" id="btn-horas" class="tab-btn">REGISTRO DE HORAS</button>
+      <button onclick="switchTab('colaboradores')" id="btn-colaboradores" class="tab-btn">COLABORADORES</button>
+    </div>
   </div>
 </div>
 
@@ -1504,6 +1554,13 @@ input[type=range]{{accent-color:#eab308;}}
     </div>
   </div>
 
+  <!-- Tendencia histórica (varios meses) del colaborador seleccionado -->
+  <div id="kpi-tendencia-hist-box" class="hidden bg-gray-900/20 border border-gray-800/50 rounded-2xl p-5 shadow-xl flex flex-col">
+    <p class="text-[11px] font-bold text-yellow-500 uppercase mb-1 font-custom">Tendencia Histórica — <span id="kpi-tendencia-hist-nombre"></span></p>
+    <p class="text-[9px] text-gray-500 mb-3">Promedio global por mes (ya con la penalización de incidencias aplicada), todos los meses con evaluaciones guardadas.</p>
+    <div class="h-[260px]"><canvas id="chartTendenciaHist"></canvas></div>
+  </div>
+
   <!-- Gráficas -->
   <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
     <div class="bg-gray-900/20 border border-gray-800/50 rounded-2xl p-5 shadow-xl flex flex-col">
@@ -1641,7 +1698,7 @@ input[type=range]{{accent-color:#eab308;}}
     <h3 class="text-xs font-bold text-gray-400 font-custom uppercase">Equipo Registrado ({len(colaboradores_activos)} colaboradores)</h3>
     <div class="flex items-center gap-2">
       <button onclick="document.getElementById('box-inactivos').classList.toggle('hidden')" class="text-[10px] text-gray-500 hover:text-yellow-500 font-bold uppercase transition-colors">Ver inactivos ({len(colaboradores_inactivos)})</button>
-      <button onclick="document.getElementById('modal-colab').classList.remove('hidden')" class="bg-yellow-500 hover:bg-yellow-400 text-gray-950 font-black px-5 py-2 rounded-xl text-xs uppercase font-custom tracking-wider transition-colors">+ Agregar Colaborador</button>
+      <button onclick="abrirAgregarColab()" class="bg-yellow-500 hover:bg-yellow-400 text-gray-950 font-black px-5 py-2 rounded-xl text-xs uppercase font-custom tracking-wider transition-colors">+ Agregar Colaborador</button>
     </div>
   </div>
 
@@ -1671,7 +1728,10 @@ input[type=range]{{accent-color:#eab308;}}
           <p class="text-[10px] text-yellow-500/70">{len(c.get('actividades',[]))} actividades</p>
         </div>
         <div class="flex flex-col items-end gap-1">
-          <button onclick="event.stopPropagation();eliminarColab('{js_str(c['nombre'])}')" class="text-gray-700 hover:text-rose-400 transition-colors font-bold text-sm">✕</button>
+          <div class="flex gap-2">
+            <button onclick="event.stopPropagation();abrirEditarColab('{js_str(c['nombre'])}')" class="text-gray-500 hover:text-yellow-400 transition-colors font-bold text-xs" title="Editar">✎</button>
+            <button onclick="event.stopPropagation();eliminarColab('{js_str(c['nombre'])}')" class="text-gray-700 hover:text-rose-400 transition-colors font-bold text-sm" title="Desactivar">✕</button>
+          </div>
           <span class="text-[9px] text-gray-600 group-hover:text-yellow-500/60 transition-colors font-bold">Ver historial →</span>
         </div>
       </div>
@@ -1693,6 +1753,7 @@ const ACTIVIDADES_HORAS = {json.dumps(ACTIVIDADES_HORAS)};
 const META_LOCAL = {META_LOCAL};
 const META_PAQ   = {META_PAQ};
 const PENALIZACION_POR_INCIDENCIA_PCT = {PENALIZACION_POR_INCIDENCIA_PCT};
+const TIPOS_PUESTO_JS = {json.dumps(TIPOS_PUESTO)};
 const COLABS_DATA = COLABS;
 const EVALS_DATA  = EVALS;
 const MESES_ES_JS = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
@@ -2488,7 +2549,48 @@ async function guardarTiempo(){{
 }}
 
 // ── Colaboradores ────────────────────────────────────────────────────────
+function abrirAgregarColab(){{
+  document.getElementById('col-editando').value='';
+  document.getElementById('modal-colab-titulo').innerText='Agregar Colaborador';
+  document.getElementById('btn-guardar-colab').innerText='Agregar Colaborador';
+  const nombreInput=document.getElementById('col-nombre');
+  nombreInput.value='';
+  nombreInput.removeAttribute('readonly');
+  nombreInput.classList.remove('opacity-60');
+  document.querySelectorAll('.col-puesto-chk').forEach(chk=>chk.checked=false);
+  document.getElementById('col-puesto-custom').value='';
+  document.getElementById('col-puesto-custom-box').classList.add('hidden');
+  document.getElementById('col-actividades').value='';
+  document.getElementById('res-colab').classList.add('hidden');
+  document.getElementById('modal-colab').classList.remove('hidden');
+}}
+
+function abrirEditarColab(nombre){{
+  const colab=COLABS_DATA.find(c=>c.nombre===nombre);
+  if(!colab)return;
+  document.getElementById('col-editando').value=nombre;
+  document.getElementById('modal-colab-titulo').innerText='Editar Colaborador';
+  document.getElementById('btn-guardar-colab').innerText='Guardar Cambios';
+  const nombreInput=document.getElementById('col-nombre');
+  nombreInput.value=nombre;
+  nombreInput.setAttribute('readonly','readonly');
+  nombreInput.classList.add('opacity-60');
+  const puestosActuales=colab.puestos||[];
+  document.querySelectorAll('.col-puesto-chk').forEach(chk=>{{chk.checked=puestosActuales.includes(chk.value);}});
+  const fueraDeCatalogo=puestosActuales.filter(p=>!TIPOS_PUESTO_JS.includes(p));
+  document.getElementById('col-puesto-custom').value=fueraDeCatalogo.join(', ');
+  if(fueraDeCatalogo.length){{
+    const chkOtro=document.querySelector('.col-puesto-chk[value="Otro"]');
+    if(chkOtro)chkOtro.checked=true;
+  }}
+  toggleTipoPuestoPersonalizado();
+  document.getElementById('col-actividades').value=(colab.actividades||[]).join('\\n');
+  document.getElementById('res-colab').classList.add('hidden');
+  document.getElementById('modal-colab').classList.remove('hidden');
+}}
+
 async function guardarColab(){{
+  const editando=document.getElementById('col-editando').value;
   const nombre=document.getElementById('col-nombre').value.trim();
   const puestos=Array.from(document.querySelectorAll('.col-puesto-chk:checked')).map(el=>el.value);
   const puestoCustom=document.getElementById('col-puesto-custom')?.value.trim() || '';
@@ -2497,7 +2599,7 @@ async function guardarColab(){{
   if(puestos.includes('Otro') && !puestoCustom){{showRes('res-colab','⚠ Especifica el puesto personalizado.','err');return;}}
   const r=await fetch('/api/colaborador',{{method:'POST',headers:{{'Content-Type':'application/json'}},
     body:JSON.stringify({{nombre,puestos,puesto_personalizado:puestoCustom,actividades:acts}})}});
-  if(r.ok){{showRes('res-colab','✓ Colaborador agregado.','ok');setTimeout(()=>location.reload(),800);}}
+  if(r.ok){{showRes('res-colab',editando?'✓ Colaborador actualizado.':'✓ Colaborador agregado.','ok');setTimeout(()=>location.reload(),800);}}
   else showRes('res-colab','⚠ '+(await r.json()).detail,'err');
 }}
 async function eliminarColab(nombre){{
@@ -2569,7 +2671,7 @@ function filtrarTiempos(){{
 }}
 
 // ── KPI charts ────────────────────────────────────────────────────────────
-let cE=null,cI=null,cF=null,cA=null,cT=null;
+let cE=null,cI=null,cF=null,cA=null,cT=null,cH=null;
 function renderKpiCharts(){{
   const colabSel = document.getElementById('kpi-colab-sel')?.value || '';
   const anioFilt = kpiAnio;
@@ -2627,6 +2729,44 @@ function renderKpiCharts(){{
   }} else {{
     cardsDiv.classList.add('hidden');
     cardsDiv.style.display='none';
+  }}
+
+  // ── Tendencia histórica (todos los meses guardados) ──────────────────
+  const histBox = document.getElementById('kpi-tendencia-hist-box');
+  const evalsColabTodas = colabSel ? EVALS.filter(e=>e.colaborador===colabSel) : [];
+  if(colabSel && evalsColabTodas.length>0){{
+    histBox.classList.remove('hidden');
+    document.getElementById('kpi-tendencia-hist-nombre').innerText=colabSel;
+    const porMes={{}};
+    evalsColabTodas.forEach(e=>{{
+      const clave=`${{e.anio}}-${{String(e.mes).padStart(2,'0')}}`;
+      if(!porMes[clave])porMes[clave]=[];
+      porMes[clave].push(e.pct);
+    }});
+    const claves=Object.keys(porMes).sort();
+    const labelsHist=claves.map(k=>{{
+      const [a,m]=k.split('-').map(Number);
+      return `${{MESES_ES_JS[m-1].slice(0,3)}} ${{a}}`;
+    }});
+    const dataHist=claves.map(k=>{{
+      const [a,m]=k.split('-').map(Number);
+      const vals=porMes[k];
+      const raw=vals.reduce((x,y)=>x+y,0)/vals.length;
+      const penal=incidenciasDelMes(colabSel,a,m)*PENALIZACION_POR_INCIDENCIA_PCT;
+      return Math.max(0, raw-penal).toFixed(1);
+    }});
+    if(cH)cH.destroy();
+    cH=new Chart(document.getElementById('chartTendenciaHist'),{{
+      type:'line',
+      data:{{labels:labelsHist,datasets:[{{data:dataHist,borderColor:'#eab308',backgroundColor:'rgba(234,179,8,0.15)',fill:true,tension:0.3,pointBackgroundColor:'#eab308'}}]}},
+      options:{{responsive:true,maintainAspectRatio:false,
+        plugins:{{legend:{{display:false}},tooltip:{{callbacks:{{label:ctx=>` ${{ctx.parsed.y}}%`}}}}}},
+        scales:{{y:{{min:0,max:100,ticks:{{color:'#6b7280',font:{{size:10}},callback:v=>v+'%'}},grid:{{color:'#1f2937'}}}},
+                 x:{{ticks:{{color:'#9ca3af',font:{{size:10}}}},grid:{{display:false}}}}}}
+      }}
+    }});
+  }} else {{
+    histBox.classList.add('hidden');
   }}
 
   // ── Gráfica 1: % promedio por colaborador ────────────────────────────
