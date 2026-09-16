@@ -20,11 +20,15 @@ LOGO_FILE  = "logo.png"
 
 ESCALA = {0:"Crítico",1:"Insuficiente",2:"Necesita mejora",3:"En observación",4:"Satisfactorio",5:"Excelente"}
 TIPOS_INC = ["Falta","Retardo","Permiso","Accidente","Conducta","Material Sucio","Material Incompleto","Mal Etiquetado","Otro"]
+TIPOS_PUESTO = ["ALMACENISTA","CHOFER","BECARIA","Otro"]
 ACTIVIDADES_HORAS = ["Hora de Conocimiento de Ruta","Hora de Entrega de Etiquetas",
                      "Hora de Término de Preparación","Hora de Entrega de Papeles",
                      "Hora de Salida","Hora de Llegada (Comida)"]
 META_LOCAL = 180
 META_PAQ   = 300
+# Puntos porcentuales que se restan del promedio global de un colaborador por
+# cada incidencia registrada en el mes que se está viendo/exportando.
+PENALIZACION_POR_INCIDENCIA_PCT = 1.0
 
 # ── Base de datos PostgreSQL ───────────────────────────────────────────────
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
@@ -44,7 +48,8 @@ def init_db():
         CREATE TABLE IF NOT EXISTS colaboradores (
             nombre TEXT PRIMARY KEY,
             puesto TEXT,
-            actividades JSONB
+            actividades JSONB,
+            activo BOOLEAN DEFAULT TRUE
         );
         CREATE TABLE IF NOT EXISTS evaluaciones (
             id SERIAL PRIMARY KEY,
@@ -101,6 +106,10 @@ def init_db():
             observaciones TEXT
         );
     """)
+    # Migración: agrega la columna 'activo' si la tabla ya existía de antes
+    # (bases de datos creadas antes de este cambio no la tienen).
+    cur.execute("ALTER TABLE colaboradores ADD COLUMN IF NOT EXISTS activo BOOLEAN DEFAULT TRUE;")
+    cur.execute("UPDATE colaboradores SET activo=TRUE WHERE activo IS NULL;")
     conn.commit()
     cur.close()
     conn.close()
@@ -131,11 +140,11 @@ def db_exec(sql, params=()):
     cur.close(); conn.close()
     return dict(result) if result else None
 
-def parse_colabs(raw):
-    """Devuelve la lista de colaboradores involucrados en una incidencia.
-    Soporta el formato nuevo (lista JSON, ej. '["ANA","LUIS"]') y el formato
-    antiguo de un solo nombre en texto plano, para no romper incidencias ya
-    guardadas antes de este cambio."""
+def parse_lista_json(raw):
+    """Devuelve una lista a partir de un campo guardado como lista JSON
+    (ej. '["ANA","LUIS"]') o, si es un texto plano de un solo valor guardado
+    antes de este cambio, lo envuelve en una lista de un elemento, para no
+    romper datos ya guardados."""
     if not raw:
         return []
     try:
@@ -146,10 +155,30 @@ def parse_colabs(raw):
         pass
     return [raw]
 
+def parse_colabs(raw):
+    """Devuelve la lista de colaboradores involucrados en una incidencia."""
+    return parse_lista_json(raw)
+
+def js_str(s):
+    """Escapa un texto para insertarlo de forma segura dentro de comillas
+    simples en JS embebido en el HTML (evita romper el onclick si el nombre
+    trae un apóstrofe, comilla o backslash)."""
+    return str(s).replace("\\", "\\\\").replace("'", "\\'")
+
+def fecha_anio_mes(fecha_str):
+    """Extrae (anio, mes) del texto de fecha 'DD/MM/YYYY HH:MM' que se usa
+    en incidencias. Devuelve (None, None) si no se puede interpretar."""
+    try:
+        dt = datetime.strptime((fecha_str or "").strip()[:10], "%d/%m/%Y")
+        return dt.year, dt.month
+    except Exception:
+        return None, None
+
 # ── Modelos ────────────────────────────────────────────────────────────────
 class Colaborador(BaseModel):
     nombre: str
-    puesto: str
+    puestos: List[str]
+    puesto_personalizado: Optional[str] = ""
     actividades: List[str]
 
 class EvalDia(BaseModel):
@@ -184,18 +213,38 @@ class Tiempo(BaseModel):
 # ── API colaboradores ──────────────────────────────────────────────────────
 @app.post("/api/colaborador")
 def add_colab(c: Colaborador):
+    puestos = [p.strip() for p in c.puestos if p and p.strip()]
+    if "Otro" in puestos:
+        puestos = [p for p in puestos if p != "Otro"]
+        extra = (c.puesto_personalizado or "").strip()
+        if extra:
+            puestos.append(extra)
+    if not puestos:
+        raise HTTPException(400, "Selecciona al menos un tipo de puesto.")
     try:
-        db_exec("INSERT INTO colaboradores (nombre,puesto,actividades) VALUES (%s,%s,%s)",
-                (c.nombre.strip(), c.puesto.strip(), json.dumps(c.actividades)))
+        # INSERT ... ON CONFLICT: si el nombre ya existía (por ejemplo,
+        # estaba desactivado), lo reactiva y actualiza sus datos en vez de
+        # fallar por el nombre duplicado.
+        db_exec("""INSERT INTO colaboradores (nombre,puesto,actividades,activo)
+                   VALUES (%s,%s,%s,TRUE)
+                   ON CONFLICT (nombre) DO UPDATE
+                   SET puesto=EXCLUDED.puesto, actividades=EXCLUDED.actividades, activo=TRUE""",
+                (c.nombre.strip(), json.dumps(puestos), json.dumps(c.actividades)))
         return {"ok":True}
     except Exception as e:
-        if "unique" in str(e).lower() or "duplicate" in str(e).lower():
-            raise HTTPException(400,"Ya existe.")
         raise HTTPException(500, str(e))
 
 @app.delete("/api/colaborador/{nombre}")
 def del_colab(nombre:str):
-    db_exec("DELETE FROM colaboradores WHERE nombre=%s", (nombre,))
+    """Desactiva al colaborador: deja de aparecer en las listas para
+    registrar evaluaciones/incidencias/horas nuevas, pero su historial ya
+    guardado se conserva tal cual."""
+    db_exec("UPDATE colaboradores SET activo=FALSE WHERE nombre=%s", (nombre.strip(),))
+    return {"ok":True}
+
+@app.patch("/api/colaborador/{nombre}/activar")
+def reactivar_colab(nombre:str):
+    db_exec("UPDATE colaboradores SET activo=TRUE WHERE nombre=%s", (nombre.strip(),))
     return {"ok":True}
 
 @app.post("/api/colaborador/{nombre}/foto")
@@ -239,6 +288,7 @@ def exportar_evaluaciones(anio: int, mes: int):
     for c in colaboradores:
         if isinstance(c.get("actividades"), str):
             c["actividades"] = json.loads(c["actividades"])
+        c["puestos"] = parse_lista_json(c.get("puesto"))
 
     evals = db_fetch("""SELECT * FROM evaluaciones WHERE anio=%s AND mes=%s ORDER BY colaborador, dia""",
                      (anio, mes))
@@ -246,9 +296,13 @@ def exportar_evaluaciones(anio: int, mes: int):
         if isinstance(e.get("calificaciones"), str):
             e["calificaciones"] = json.loads(e["calificaciones"])
 
-    # Conteo de incidencias por colaborador (una incidencia puede involucrar a varios)
+    # Conteo de incidencias por colaborador EN ESE MES (una incidencia puede
+    # involucrar a varios). Se usa para restar del promedio global.
     inc_por_colab = {}
-    for row in db_fetch("SELECT colaborador FROM incidencias"):
+    for row in db_fetch("SELECT colaborador, fecha FROM incidencias"):
+        a, m = fecha_anio_mes(row.get("fecha"))
+        if a != anio or m != mes:
+            continue
         for nombre in parse_colabs(row.get("colaborador")):
             inc_por_colab[nombre] = inc_por_colab.get(nombre, 0) + 1
 
@@ -316,12 +370,14 @@ def exportar_evaluaciones(anio: int, mes: int):
                 if act not in act_map: act_map[act] = []
                 act_map[act].append(val)
         act_promedios = {a: round(sum(v)/len(v)/5*100,1) for a,v in act_map.items()}
-        prom_global = round(sum(act_promedios.values())/len(act_promedios),1) if act_promedios else 0
+        prom_global_bruto = round(sum(act_promedios.values())/len(act_promedios),1) if act_promedios else 0
         mejor = max(act_promedios, key=act_promedios.get) if act_promedios else "—"
         peor  = min(act_promedios, key=act_promedios.get) if act_promedios else "—"
         n_inc = inc_por_colab.get(colab["nombre"], 0)
+        # Cada incidencia del mes resta puntos porcentuales al promedio global final.
+        prom_global = max(0, round(prom_global_bruto - n_inc * PENALIZACION_POR_INCIDENCIA_PCT, 1))
 
-        vals = [colab["nombre"], colab.get("puesto",""), dias, f"{prom_global}%",
+        vals = [colab["nombre"], ", ".join(colab.get("puestos") or []), dias, f"{prom_global}%",
                 f"{mejor} ({act_promedios.get(mejor,0):.0f}%)",
                 f"{peor} ({act_promedios.get(peor,0):.0f}%)", n_inc]
         for col, v in enumerate(vals, 1):
@@ -356,7 +412,7 @@ def exportar_evaluaciones(anio: int, mes: int):
 
         # Header colaborador
         ws.merge_cells(f"A{fila}:H{fila}")
-        cell = ws.cell(fila, 1, f"{colab['nombre']} — {colab.get('puesto','')}")
+        cell = ws.cell(fila, 1, f"{colab['nombre']} — {', '.join(colab.get('puestos') or [])}")
         aplicar_estilo(cell, **estilo_header("0f4c81", "e0f2fe", bold=True, size=11))
         ws.row_dimensions[fila].height = 20
         fila += 1
@@ -703,6 +759,11 @@ def pagina():
     for c in colaboradores:
         if isinstance(c.get("actividades"), str):
             c["actividades"] = json.loads(c["actividades"])
+        c["puestos"] = parse_lista_json(c.get("puesto"))
+        if c.get("activo") is None:
+            c["activo"] = True
+    colaboradores_activos = [c for c in colaboradores if c.get("activo")]
+    colaboradores_inactivos = [c for c in colaboradores if not c.get("activo")]
 
     evaluaciones = db_fetch("SELECT * FROM evaluaciones ORDER BY anio,mes,dia")
     for e in evaluaciones:
@@ -712,6 +773,8 @@ def pagina():
     incidencias = db_fetch("SELECT * FROM incidencias ORDER BY id DESC")
     for inc in incidencias:
         inc["colaboradores"] = parse_colabs(inc.get("colaborador"))
+        a, m = fecha_anio_mes(inc.get("fecha"))
+        inc["anio"], inc["mes"] = a, m
 
     tiempos = db_fetch("SELECT * FROM tiempos ORDER BY id DESC")
 
@@ -723,8 +786,11 @@ def pagina():
             h["cumplimientos"] = json.loads(h["cumplimientos"])
 
     logo_html=f'<img src="/static/{LOGO_FILE}" alt="LUQROSS" class="w-28 h-auto object-contain block mr-4 select-none">' if os.path.exists(f"static/{LOGO_FILE}") else ""
-    opts_colab="".join([f'<option value="{c["nombre"]}">{c["nombre"]}</option>' for c in colaboradores])
-    opts_colab_chk="".join([f'<label class="flex items-center gap-2 text-[11px] text-gray-300 hover:text-white cursor-pointer"><input type="checkbox" class="inc-colab-chk accent-rose-500" value="{c["nombre"]}"> {c["nombre"]}</label>' for c in colaboradores]) or '<p class="text-[10px] text-gray-600">No hay colaboradores registrados.</p>'
+    # "_activos": para registrar cosas NUEVAS (evaluación, incidencia, horas) — solo colaboradores activos.
+    # "_todos": para filtros/análisis histórico — incluye también a los desactivados, para no perder su historial.
+    opts_colab_activos="".join([f'<option value="{c["nombre"]}">{c["nombre"]}</option>' for c in colaboradores_activos])
+    opts_colab_todos="".join([f'<option value="{c["nombre"]}">{c["nombre"]}</option>' for c in colaboradores])
+    opts_colab_chk="".join([f'<label class="flex items-center gap-2 text-[11px] text-gray-300 hover:text-white cursor-pointer"><input type="checkbox" class="inc-colab-chk accent-rose-500" value="{c["nombre"]}"> {c["nombre"]}</label>' for c in colaboradores_activos]) or '<p class="text-[10px] text-gray-600">No hay colaboradores activos.</p>'
 
     # KPI cards globales
     total_eval=len(set((e["colaborador"],e["anio"],e["mes"]) for e in evaluaciones))
@@ -1099,7 +1165,16 @@ input[type=range]{{accent-color:#eab308;}}
     <div class="flex justify-between"><h3 class="text-xs font-bold text-yellow-500 font-custom uppercase">Agregar Colaborador</h3><button onclick="document.getElementById('modal-colab').classList.add('hidden')" class="text-gray-500 hover:text-white font-bold">✕</button></div>
     <div class="space-y-3">
       <div><label class="lbl">Nombre Completo</label><input id="col-nombre" class="field" placeholder="Ej. Juan Pérez"></div>
-      <div><label class="lbl">Puesto</label><input id="col-puesto" class="field" placeholder="Ej. Almacenista, Chofer Almacenista"></div>
+      <div>
+        <label class="lbl">Tipo de Puesto (puedes marcar varios)</label>
+        <div class="field" style="display:flex;flex-direction:column;gap:6px;">
+          {"".join([f'<label class="flex items-center gap-2 text-[11px] text-gray-300 hover:text-white cursor-pointer"><input type="checkbox" class="col-puesto-chk accent-yellow-500" value="{t}" onchange="{"toggleTipoPuestoPersonalizado()" if t=="Otro" else ""}"> {t}</label>' for t in TIPOS_PUESTO])}
+        </div>
+      </div>
+      <div id="col-puesto-custom-box" class="hidden">
+        <label class="lbl">Especifica el puesto</label>
+        <input id="col-puesto-custom" class="field" placeholder="Ej. Supervisor">
+      </div>
       <div>
         <label class="lbl">Actividades a Evaluar (una por línea)</label>
         <textarea id="col-actividades" rows="8" class="field resize-none" placeholder="ETIQUETADO CORRECTO&#10;PRODUCTO CORRECTO&#10;PREPARACIÓN DE PEDIDO&#10;..."></textarea>
@@ -1205,7 +1280,7 @@ input[type=range]{{accent-color:#eab308;}}
           <label class="lbl">Colaborador</label>
           <select id="eval-colab-sel" onchange="cargarCalendario(); actualizarFotoEval();" class="field">
             <option value="">-- Selecciona colaborador --</option>
-            {opts_colab}
+            {opts_colab_activos}
           </select>
         </div>
         <div class="w-44">
@@ -1304,7 +1379,7 @@ input[type=range]{{accent-color:#eab308;}}
             <label class="lbl">Colaborador</label>
             <select id="filtro-inc-colab" onchange="filtrarInc()" class="bg-gray-950 border border-gray-800 text-white text-xs rounded-lg px-2 py-1.5 outline-none w-full focus:border-yellow-500">
               <option value="">-- Todos --</option>
-              {opts_colab}
+              {opts_colab_todos}
             </select>
           </div>
           <div>
@@ -1387,7 +1462,7 @@ input[type=range]{{accent-color:#eab308;}}
           <label class="lbl">Colaborador</label>
           <select id="kpi-colab-sel" onchange="renderKpiCharts()" class="field">
             <option value="">-- Todos los colaboradores --</option>
-            {opts_colab}
+            {opts_colab_todos}
           </select>
         </div>
         <!-- Chips de info del filtro activo -->
@@ -1473,12 +1548,7 @@ input[type=range]{{accent-color:#eab308;}}
       <div><label class="lbl">Operador</label>
         <select id="hr-colab" class="field">
           <option value="">-- Selecciona --</option>
-          <option>CARLOS ISMAEL RUIZ FITZ</option>
-          <option>VICTOR ALDAIR MIRAMON MORALES</option>
-          <option>DANIEL RIVAS PARRA</option>
-          <option>OSCAR ALFREDO TORRES CAMBRON</option>
-          <option>GAMALIEL ISAID RUIZ GARCIA</option>
-          <option>PEDRO ISMAEL RODRIGUEZ VALDES</option>
+          {opts_colab_activos}
           <option>ALMACEN</option>
         </select>
       </div>
@@ -1567,34 +1637,47 @@ input[type=range]{{accent-color:#eab308;}}
 <!-- ══ TAB COLABORADORES ══════════════════════════════════════════════ -->
 <div id="tab-colaboradores" class="tab-content hidden space-y-4">
   <div class="flex justify-between items-center">
-    <h3 class="text-xs font-bold text-gray-400 font-custom uppercase">Equipo Registrado ({len(colaboradores)} colaboradores)</h3>
-    <button onclick="document.getElementById('modal-colab').classList.remove('hidden')" class="bg-yellow-500 hover:bg-yellow-400 text-gray-950 font-black px-5 py-2 rounded-xl text-xs uppercase font-custom tracking-wider transition-colors">+ Agregar Colaborador</button>
+    <h3 class="text-xs font-bold text-gray-400 font-custom uppercase">Equipo Registrado ({len(colaboradores_activos)} colaboradores)</h3>
+    <div class="flex items-center gap-2">
+      <button onclick="document.getElementById('box-inactivos').classList.toggle('hidden')" class="text-[10px] text-gray-500 hover:text-yellow-500 font-bold uppercase transition-colors">Ver inactivos ({len(colaboradores_inactivos)})</button>
+      <button onclick="document.getElementById('modal-colab').classList.remove('hidden')" class="bg-yellow-500 hover:bg-yellow-400 text-gray-950 font-black px-5 py-2 rounded-xl text-xs uppercase font-custom tracking-wider transition-colors">+ Agregar Colaborador</button>
+    </div>
   </div>
+
+  <div id="box-inactivos" class="hidden bg-gray-900/20 border border-gray-800 rounded-xl p-4 space-y-2">
+    <p class="text-[10px] text-gray-500 uppercase font-bold">Colaboradores desactivados — su historial se conserva; reactívalos si fue un error o vuelven a trabajar contigo.</p>
+    {''.join([f'''
+    <div class="flex items-center justify-between bg-gray-950/40 rounded-lg px-3 py-2">
+      <span class="text-xs text-gray-400 uppercase">{c["nombre"]}</span>
+      <button onclick="reactivarColab('{js_str(c["nombre"])}')" class="text-[10px] font-bold text-emerald-400 hover:text-emerald-300 underline">Reactivar</button>
+    </div>''' for c in colaboradores_inactivos]) or '<p class="text-[10px] text-gray-600">No hay colaboradores desactivados.</p>'}
+  </div>
+
   <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4" id="grid-colaboradores">
     {''.join([f"""
-    <div onclick="abrirHistorial('{c['nombre']}')" class="bg-gray-900/30 border border-gray-800 rounded-2xl p-4 space-y-3 shadow cursor-pointer hover:border-yellow-500/40 hover:bg-gray-900/50 transition-all duration-200 group">
+    <div onclick="abrirHistorial('{js_str(c['nombre'])}')" class="bg-gray-900/30 border border-gray-800 rounded-2xl p-4 space-y-3 shadow cursor-pointer hover:border-yellow-500/40 hover:bg-gray-900/50 transition-all duration-200 group">
       <div class="flex items-center gap-3">
         <div class="relative">
           <img src="/static/fotos/{c['nombre']}.jpg" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" class="w-20 h-20 rounded-full object-cover border-2 border-yellow-500/40 shadow group-hover:border-yellow-500 transition-colors">
           <div class="w-20 h-20 rounded-full bg-yellow-500/10 border-2 border-yellow-500/30 items-center justify-center text-yellow-500 font-black text-2xl hidden" style="display:none">{c['nombre'][0].upper()}</div>
           <label onclick="event.stopPropagation()" class="absolute -bottom-1 -right-1 bg-gray-800 hover:bg-yellow-500 text-gray-400 hover:text-gray-900 border border-gray-700 rounded-full w-5 h-5 flex items-center justify-center cursor-pointer transition-colors text-[10px]" title="Cambiar foto">
-            📷<input type="file" accept=".jpg,.jpeg,.png" onchange="subirFoto('{c['nombre']}',this)" class="hidden">
+            📷<input type="file" accept=".jpg,.jpeg,.png" onchange="subirFoto('{js_str(c['nombre'])}',this)" class="hidden">
           </label>
         </div>
         <div class="flex-1">
           <p class="text-sm font-black text-white group-hover:text-yellow-400 transition-colors">{c['nombre']}</p>
-          <p class="text-[10px] text-gray-500 uppercase">{c['puesto']}</p>
+          <p class="text-[10px] text-gray-500 uppercase">{", ".join(c.get('puestos') or [])}</p>
           <p class="text-[10px] text-yellow-500/70">{len(c.get('actividades',[]))} actividades</p>
         </div>
         <div class="flex flex-col items-end gap-1">
-          <button onclick="event.stopPropagation();eliminarColab('{c['nombre']}')" class="text-gray-700 hover:text-rose-400 transition-colors font-bold text-sm">✕</button>
+          <button onclick="event.stopPropagation();eliminarColab('{js_str(c['nombre'])}')" class="text-gray-700 hover:text-rose-400 transition-colors font-bold text-sm">✕</button>
           <span class="text-[9px] text-gray-600 group-hover:text-yellow-500/60 transition-colors font-bold">Ver historial →</span>
         </div>
       </div>
       <div class="bg-gray-950/40 rounded-xl p-2 max-h-32 overflow-y-auto space-y-0.5">
         {''.join([f'<p class="text-[10px] text-gray-400 font-medium">• {act}</p>' for act in c.get('actividades',[])])}
       </div>
-    </div>""" for c in colaboradores])}
+    </div>""" for c in colaboradores_activos])}
   </div>
 </div>
 
@@ -1608,9 +1691,15 @@ const HORAS_DATA       = {json.dumps(horas)};
 const ACTIVIDADES_HORAS = {json.dumps(ACTIVIDADES_HORAS)};
 const META_LOCAL = {META_LOCAL};
 const META_PAQ   = {META_PAQ};
+const PENALIZACION_POR_INCIDENCIA_PCT = {PENALIZACION_POR_INCIDENCIA_PCT};
 const COLABS_DATA = COLABS;
 const EVALS_DATA  = EVALS;
 const MESES_ES_JS = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
+
+// Incidencias de un colaborador en un año/mes dado (para restar del promedio global).
+function incidenciasDelMes(nombre, anio, mes) {{
+  return INCIDENCIAS_DATA.filter(i => (i.colaboradores||[]).includes(nombre) && i.anio===anio && i.mes===mes).length;
+}}
 
 // ── Descargar Excel evaluaciones ──────────────────────────────────────────
 async function descargarExcelEval() {{
@@ -1698,7 +1787,7 @@ function renderTarjetasEquipo() {{
           <div class="w-16 h-16 rounded-full bg-yellow-500/10 border-2 border-yellow-500/30 items-center justify-center text-yellow-500 font-black text-2xl shrink-0" style="display:none">${{colab.nombre[0]}}</div>
           <div class="flex-1 min-w-0">
             <p class="font-black text-white text-sm uppercase leading-tight">${{colab.nombre}}</p>
-            <p class="text-[10px] text-gray-400 font-bold uppercase">${{colab.puesto}}</p>
+            <p class="text-[10px] text-gray-400 font-bold uppercase">${{(colab.puestos||[]).join(', ')}}</p>
             <p class="text-[10px] text-yellow-500">${{MESES_ES_JS[mes-1]}} ${{anio}}</p>
           </div>
           <div class="text-right shrink-0">
@@ -1785,7 +1874,7 @@ function abrirHistorial(nombre) {{
   foto.style.display = 'block'; init.style.display = 'none';
   init.innerText = nombre[0].toUpperCase();
   document.getElementById('mh-nombre').innerText = nombre;
-  document.getElementById('mh-puesto').innerText = colab.puesto;
+  document.getElementById('mh-puesto').innerText = (colab.puestos||[]).join(', ');
 
   const evs = EVALS.filter(e => e.colaborador === nombre);
   const porMes = {{}};
@@ -1925,7 +2014,7 @@ function actualizarFotoEval() {{
   img.style.display = 'block';
   init.style.display = 'none';
   init.innerText = nombre[0].toUpperCase();
-  badge.innerText = colab ? colab.puesto : '';
+  badge.innerText = colab ? (colab.puestos||[]).join(', ') : '';
 }}
 function switchTab(name) {{
   document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
@@ -2126,7 +2215,7 @@ function verTarjeta() {{
         <div class="w-20 h-20 rounded-xl bg-yellow-500/10 border-2 border-yellow-500/30 items-center justify-center text-yellow-500 font-black text-3xl hidden">${{nombre[0].toUpperCase()}}</div>
         <div>
           <p class="text-lg font-black text-white uppercase font-custom">${{nombre}}</p>
-          <p class="text-xs text-gray-400 uppercase font-bold">${{colab.puesto}}</p>
+          <p class="text-xs text-gray-400 uppercase font-bold">${{(colab.puestos||[]).join(', ')}}</p>
           <p class="text-xs text-yellow-500/70 mt-1">${{mesNombre}} ${{anio}}</p>
         </div>
         <div class="ml-auto text-right">
@@ -2156,6 +2245,13 @@ function toggleTipoPersonalizado() {{
   const box  = document.getElementById('inc-tipo-custom-box');
   box.classList.toggle('hidden', tipo !== 'Otro');
   if (tipo !== 'Otro') document.getElementById('inc-tipo-custom').value = '';
+}}
+
+function toggleTipoPuestoPersonalizado() {{
+  const otroChecked = document.querySelector('.col-puesto-chk[value="Otro"]')?.checked;
+  const box = document.getElementById('col-puesto-custom-box');
+  box.classList.toggle('hidden', !otroChecked);
+  if (!otroChecked) document.getElementById('col-puesto-custom').value = '';
 }}
 
 function previsualizarFotoInc(input) {{
@@ -2367,17 +2463,23 @@ async function guardarTiempo(){{
 // ── Colaboradores ────────────────────────────────────────────────────────
 async function guardarColab(){{
   const nombre=document.getElementById('col-nombre').value.trim();
-  const puesto=document.getElementById('col-puesto').value.trim();
+  const puestos=Array.from(document.querySelectorAll('.col-puesto-chk:checked')).map(el=>el.value);
+  const puestoCustom=document.getElementById('col-puesto-custom')?.value.trim() || '';
   const acts=document.getElementById('col-actividades').value.split('\\n').map(s=>s.trim().toUpperCase()).filter(Boolean);
-  if(!nombre||!puesto||acts.length===0){{showRes('res-colab','⚠ Completa todos los campos.','err');return;}}
+  if(!nombre||!puestos.length||acts.length===0){{showRes('res-colab','⚠ Completa el nombre, al menos un tipo de puesto y las actividades.','err');return;}}
+  if(puestos.includes('Otro') && !puestoCustom){{showRes('res-colab','⚠ Especifica el puesto personalizado.','err');return;}}
   const r=await fetch('/api/colaborador',{{method:'POST',headers:{{'Content-Type':'application/json'}},
-    body:JSON.stringify({{nombre,puesto,actividades:acts}})}});
+    body:JSON.stringify({{nombre,puestos,puesto_personalizado:puestoCustom,actividades:acts}})}});
   if(r.ok){{showRes('res-colab','✓ Colaborador agregado.','ok');setTimeout(()=>location.reload(),800);}}
   else showRes('res-colab','⚠ '+(await r.json()).detail,'err');
 }}
 async function eliminarColab(nombre){{
-  if(!confirm(`¿Eliminar a ${{nombre}}?`))return;
+  if(!confirm(`¿Desactivar a ${{nombre}}? Ya no aparecerá para registrar evaluaciones, incidencias u horas nuevas, pero su historial se conserva. Lo puedes reactivar después desde "Ver inactivos".`))return;
   await fetch(`/api/colaborador/${{encodeURIComponent(nombre)}}`,{{method:'DELETE'}});
+  location.reload();
+}}
+async function reactivarColab(nombre){{
+  await fetch(`/api/colaborador/${{encodeURIComponent(nombre)}}/activar`,{{method:'PATCH'}});
   location.reload();
 }}
 async function subirFoto(nombre,input){{
@@ -2460,8 +2562,9 @@ function renderKpiCharts(){{
     cardsDiv.classList.remove('hidden');
     cardsDiv.style.display='grid';
     const dias=evFilt.length;
-    const prom=(evFilt.reduce((a,b)=>a+b.pct,0)/dias).toFixed(1);
-    const incCount=INCIDENCIAS_DATA.filter(i=>(i.colaboradores||[]).includes(colabSel)).length;
+    const incCount=incidenciasDelMes(colabSel, anioFilt, mesFilt);
+    const promBruto=evFilt.reduce((a,b)=>a+b.pct,0)/dias;
+    const prom=Math.max(0, promBruto - incCount*PENALIZACION_POR_INCIDENCIA_PCT).toFixed(1);
     // Mejor actividad
     const actTotals={{}};
     evFilt.forEach(e=>Object.entries(e.calificaciones).forEach(([k,v])=>{{
@@ -2503,7 +2606,12 @@ function renderKpiCharts(){{
   const evalMap={{}};
   evFilt.forEach(e=>{{if(!evalMap[e.colaborador])evalMap[e.colaborador]=[];evalMap[e.colaborador].push(e.pct);}});
   const eL=Object.keys(evalMap).length?Object.keys(evalMap):['Sin datos'];
-  const eD=eL.map(l=>evalMap[l]?(evalMap[l].reduce((a,b)=>a+b,0)/evalMap[l].length).toFixed(1):0);
+  const eD=eL.map(l=>{{
+    if(!evalMap[l]) return 0;
+    const raw=evalMap[l].reduce((a,b)=>a+b,0)/evalMap[l].length;
+    const penal=incidenciasDelMes(l, anioFilt, mesFilt)*PENALIZACION_POR_INCIDENCIA_PCT;
+    return Math.max(0, raw-penal).toFixed(1);
+  }});
   const eColors=eD.map(v=>parseFloat(v)>=80?'#10b981':parseFloat(v)>=60?'#f59e0b':'#f43f5e');
 
   if(cE)cE.destroy();
