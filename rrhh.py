@@ -1296,7 +1296,8 @@ input[type=range]{{accent-color:#eab308;}}
   <div class="bg-gray-900/20 border border-gray-800/50 backdrop-blur-sm rounded-2xl p-5 shadow-2xl space-y-4">
     <div class="flex justify-between items-center border-b border-gray-800 pb-2">
       <h3 class="text-xs font-bold text-gray-400 font-custom uppercase">Matriz de Evaluación Diaria</h3>
-      <div class="flex gap-2 flex-wrap">
+      <div class="flex gap-2 flex-wrap items-center">
+        <button onclick="marcarHoyExcelente()" class="text-[9px] px-2 py-1 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/20 font-bold uppercase transition-colors">✓ Marcar hoy como Excelente</button>
         <span class="text-[9px] px-2 py-0.5 rounded score-badge-5 font-bold">5 Excelente</span>
         <span class="text-[9px] px-2 py-0.5 rounded score-badge-4 font-bold">4 Satisfactorio</span>
         <span class="text-[9px] px-2 py-0.5 rounded score-badge-3 font-bold">3 En observación</span>
@@ -2037,16 +2038,42 @@ function cargarCalendario() {{
   if (!nombre || !mes) return;
 
   const [anio, mesN] = mes.split('-').map(Number);
-  const diasMes = new Date(anio, mesN, 0).getDate();
   const colab   = COLABS.find(c => c.nombre === nombre);
   if (!colab) return;
 
-  const actividades = colab.actividades || [];
-  // Cargar evals existentes del mes
+  // Cargar evals existentes del mes (esto sí reemplaza evalData con lo ya guardado)
   evalData = {{}};
   EVALS.filter(e => e.colaborador===nombre && e.anio===anio && e.mes===mesN).forEach(e => {{
     evalData[e.dia] = e.calificaciones;
   }});
+
+  renderTablaCalendario(anio, mesN, colab);
+}}
+
+function marcarHoyExcelente() {{
+  const nombre = document.getElementById('eval-colab-sel').value;
+  const mes    = document.getElementById('eval-mes').value;
+  if (!nombre || !mes) {{ showRes('res-eval','⚠ Selecciona colaborador y mes.','err'); return; }}
+  const [anio, mesN] = mes.split('-').map(Number);
+  const hoy = new Date();
+  if (hoy.getFullYear()!==anio || hoy.getMonth()+1!==mesN) {{
+    showRes('res-eval','⚠ Este botón solo marca el día de hoy — cambia el mes al actual para usarlo.','err');
+    return;
+  }}
+  const colab = COLABS.find(c => c.nombre === nombre);
+  if (!colab) return;
+  const dia = hoy.getDate();
+  const acts = colab.actividades || [];
+  if (!acts.length) return;
+  if (!confirm(`¿Marcar las ${{acts.length}} actividades de hoy (día ${{dia}}) como Excelente (5)? Luego puedes bajar las que necesiten ajuste, antes de guardar.`)) return;
+  if (!evalData[dia]) evalData[dia] = {{}};
+  acts.forEach(act => {{ evalData[dia][act] = 5; }});
+  renderTablaCalendario(anio, mesN, colab);
+}}
+
+function renderTablaCalendario(anio, mesN, colab) {{
+  const diasMes = new Date(anio, mesN, 0).getDate();
+  const actividades = colab.actividades || [];
 
   // Días de la semana — sin domingos (dow=0)
   const DIAS_SEM = ['D','L','M','M','J','V','S'];
