@@ -1034,6 +1034,7 @@ def pagina():
         <link rel="icon" type="image/png" href="/static/logo.png">
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 <style>
 @font-face{{font-family:'MiFuenteCustom';src:url('/static/{FONT_FILE}') format('truetype');}}
 .font-custom{{font-family:'MiFuenteCustom',sans-serif;letter-spacing:.05em;}}
@@ -1571,6 +1572,9 @@ input[type=range]{{accent-color:#eab308;}}
           </span>
           <button onclick="limpiarFiltroKpi()" class="text-[10px] bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-400 hover:text-white px-3 py-1 rounded-full font-bold transition-colors">
             Limpiar filtro
+          </button>
+          <button id="btn-descargar-kpi-img" onclick="descargarImagenKpi()" class="text-[10px] bg-emerald-600 hover:bg-emerald-500 text-white px-3 py-1 rounded-full font-bold transition-colors">
+            📷 Descargar Imagen
           </button>
         </div>
       </div>
@@ -2160,6 +2164,33 @@ function limpiarFiltroKpi() {{
   document.getElementById('kpi-colab-sel').value = '';
   iniciarCalendarioKpi();
   renderKpiCharts();
+}}
+
+// ── Descargar la pestaña de KPIs como imagen ───────────────────────────────
+async function descargarImagenKpi() {{
+  const btn = document.getElementById('btn-descargar-kpi-img');
+  const textoOriginal = btn.innerText;
+  btn.innerText = '⏳ Generando...'; btn.disabled = true;
+  try {{
+    const nodo = document.getElementById('tab-kpi');
+    const canvas = await html2canvas(nodo, {{
+      backgroundColor: '#0f172a',
+      scale: 2,
+      useCORS: true,
+      ignoreElements: (el) => el.id === 'btn-descargar-kpi-img'
+    }});
+    const sel = document.getElementById('kpi-filtro-label') ? document.getElementById('kpi-filtro-label').innerText.trim() : '';
+    const sufijo = sel ? '_' + sel.replace(/\\s+/g,'_') : '';
+    const a = document.createElement('a');
+    a.href = canvas.toDataURL('image/png');
+    a.download = `KPIs_LUQROSS${{sufijo}}.png`;
+    a.click();
+  }} catch (err) {{
+    alert('No se pudo generar la imagen. Intenta de nuevo.');
+    console.error(err);
+  }} finally {{
+    btn.innerText = textoOriginal; btn.disabled = false;
+  }}
 }}
 
 // ── Foto colaborador en evaluación ────────────────────────────────────────
