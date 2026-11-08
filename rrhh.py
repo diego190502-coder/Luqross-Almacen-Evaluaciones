@@ -824,12 +824,16 @@ def pagina():
 
     tiempos = db_fetch("SELECT * FROM tiempos ORDER BY id DESC")
 
-    horas = db_fetch("SELECT * FROM horas ORDER BY fecha DESC LIMIT 80")
+    horas = db_fetch("SELECT * FROM horas ORDER BY fecha DESC")
     for h in horas:
         if isinstance(h.get("horas"), str):
             h["horas"] = json.loads(h["horas"])
         if isinstance(h.get("cumplimientos"), str):
             h["cumplimientos"] = json.loads(h["cumplimientos"])
+        try:
+            h["anio"], h["mes"] = int(h["fecha"][:4]), int(h["fecha"][5:7])
+        except Exception:
+            h["anio"], h["mes"] = None, None
 
     logo_html=f'<img src="/static/{LOGO_FILE}" alt="LUQROSS" class="w-28 h-auto object-contain block mr-4 select-none">' if os.path.exists(f"static/{LOGO_FILE}") else ""
     # "_activos": para registrar cosas NUEVAS (evaluación, incidencia, horas) — solo colaboradores activos.
@@ -840,7 +844,7 @@ def pagina():
 
     # KPI cards globales
     total_eval=len(set((e["colaborador"],e["anio"],e["mes"]) for e in evaluaciones))
-    inc_abiertas=sum(1 for i in incidencias if i["estatus"]=="Abierta")
+    inc_abiertas=sum(1 for i in incidencias if i["estatus"]=="Abierta" and i.get("anio")==datetime.now().year and i.get("mes")==datetime.now().month)
     pct_optimos=round(sum(1 for t in tiempos if t["nivel"]=="Óptimo")/len(tiempos)*100,1) if tiempos else 0
     prom_global=round(sum(e["pct"] for e in evaluaciones)/len(evaluaciones),1) if evaluaciones else 0
 
@@ -868,6 +872,12 @@ def pagina():
     avg_paq_mins   = round(sum(h["minutos_prep"] for h in paq_h)/len(paq_h),1)     if paq_h   else None
     avg_local_str  = mins_a_hms(avg_local_mins)
     avg_paq_str    = mins_a_hms(avg_paq_mins)
+
+    # Meses disponibles para el selector de "Meta Preparación"
+    _MESES_ES_PREP = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"]
+    opts_mes_prep = "".join([f'<option value="{anio}-{mes}">{_MESES_ES_PREP[mes-1]} {anio}</option>'
+                              for anio,mes in sorted(set((h["anio"],h["mes"]) for h in horas_con_prep if h.get("anio") and h.get("mes")), reverse=True)]) \
+                    or '<option>Sin datos</option>'
 
     color_prep = ('text-emerald-400' if pct_cumplimiento_prep and pct_cumplimiento_prep>=80
                   else 'text-yellow-400' if pct_cumplimiento_prep and pct_cumplimiento_prep>=60
@@ -1071,7 +1081,7 @@ input[type=range]{{accent-color:#eab308;}}
       <h3 class="text-sm font-bold text-amber-400 font-custom uppercase">Tiempo de Preparación</h3>
       <button onclick="document.getElementById('modal-prep').classList.add('hidden')" class="text-gray-500 hover:text-white font-bold text-xl">✕</button>
     </div>
-    <p class="text-[10px] text-gray-500 uppercase font-bold">Registros del período actual (últimos 80)</p>
+    <p id="prep-modal-label" class="text-[10px] text-gray-500 uppercase font-bold">Registros del mes seleccionado</p>
     <table class="w-full border-collapse text-sm">
       <thead>
         <tr class="bg-gray-800 text-[10px] text-gray-400 uppercase font-bold tracking-wide">
@@ -1086,19 +1096,19 @@ input[type=range]{{accent-color:#eab308;}}
         <tr class="border-b border-gray-800">
           <td class="px-4 py-3 font-bold text-white">LOCAL</td>
           <td class="px-4 py-3 text-center text-gray-400 text-xs">&lt; 3h</td>
-          <td class="px-4 py-3 text-center font-mono font-bold text-blue-300">{avg_local_str}</td>
-          <td class="px-4 py-3 text-center text-[11px] text-gray-400">{local_ok}/{len(local_h)}</td>
+          <td id="prep-avg-local" class="px-4 py-3 text-center font-mono font-bold text-blue-300">{avg_local_str}</td>
+          <td id="prep-rutas-local" class="px-4 py-3 text-center text-[11px] text-gray-400">{local_ok}/{len(local_h)}</td>
           <td class="px-4 py-3 text-center">
-            <span class="font-black text-sm px-3 py-1 rounded-lg {bg_local} text-white">{f'{pct_local}%' if pct_local is not None else '—'}</span>
+            <span id="prep-badge-local" class="font-black text-sm px-3 py-1 rounded-lg {bg_local} text-white">{f'{pct_local}%' if pct_local is not None else '—'}</span>
           </td>
         </tr>
         <tr>
           <td class="px-4 py-3 font-bold text-white">PAQUETERÍA</td>
           <td class="px-4 py-3 text-center text-gray-400 text-xs">&lt; 5h</td>
-          <td class="px-4 py-3 text-center font-mono font-bold text-purple-300">{avg_paq_str}</td>
-          <td class="px-4 py-3 text-center text-[11px] text-gray-400">{paq_ok}/{len(paq_h)}</td>
+          <td id="prep-avg-paq" class="px-4 py-3 text-center font-mono font-bold text-purple-300">{avg_paq_str}</td>
+          <td id="prep-rutas-paq" class="px-4 py-3 text-center text-[11px] text-gray-400">{paq_ok}/{len(paq_h)}</td>
           <td class="px-4 py-3 text-center">
-            <span class="font-black text-sm px-3 py-1 rounded-lg {bg_paq} text-white">{f'{pct_paq}%' if pct_paq is not None else '—'}</span>
+            <span id="prep-badge-paq" class="font-black text-sm px-3 py-1 rounded-lg {bg_paq} text-white">{f'{pct_paq}%' if pct_paq is not None else '—'}</span>
           </td>
         </tr>
       </tbody>
@@ -1270,15 +1280,19 @@ input[type=range]{{accent-color:#eab308;}}
 
   <div class="bg-gray-900/40 border border-gray-800 rounded-xl p-4 text-center shadow">
     <p class="text-[9px] text-rose-400 uppercase font-bold tracking-wider mb-1">Incidencias Abiertas</p>
-    <p class="text-2xl font-black text-rose-400 font-custom">{inc_abiertas}</p>
+    <p id="kpi-inc-abiertas" class="text-2xl font-black text-rose-400 font-custom">{inc_abiertas}</p>
+    <p class="text-[9px] text-gray-600 mt-1">Del mes elegido en Promedio Global</p>
   </div>
 
   <div class="card p-4 text-center shadow cursor-pointer hover:bg-rose-900/20 transition-colors col-span-2 md:col-span-1" onclick="document.getElementById('modal-prep').classList.remove('hidden')">
     <p class="text-[9px] text-amber-400 uppercase font-bold tracking-wider mb-1">Meta Preparación <span class="text-[8px] text-gray-600">(clic para desglose)</span></p>
-    <p class="text-2xl font-black {color_prep} font-custom">{f'{pct_cumplimiento_prep}%' if pct_cumplimiento_prep is not None else '—'}</p>
+    <select id="prep-mes-selector" onclick="event.stopPropagation()" onchange="actualizarMetaPrep()" class="w-full bg-gray-950 border border-gray-700 text-white text-[10px] rounded-lg px-2 py-1 outline-none focus:border-yellow-500 text-center mb-1">
+      {opts_mes_prep}
+    </select>
+    <p id="prep-pct-valor" class="text-2xl font-black {color_prep} font-custom">{f'{pct_cumplimiento_prep}%' if pct_cumplimiento_prep is not None else '—'}</p>
     <div class="flex justify-center gap-3 mt-1.5">
-      <span class="text-[9px] text-gray-500">🚐 Local: <span class="font-bold text-blue-400">{f'{pct_local}%' if pct_local is not None else '—'}</span></span>
-      <span class="text-[9px] text-gray-500">📦 Paq: <span class="font-bold text-purple-400">{f'{pct_paq}%' if pct_paq is not None else '—'}</span></span>
+      <span class="text-[9px] text-gray-500">🚐 Local: <span id="prep-pct-local" class="font-bold text-blue-400">{f'{pct_local}%' if pct_local is not None else '—'}</span></span>
+      <span class="text-[9px] text-gray-500">📦 Paq: <span id="prep-pct-paq" class="font-bold text-purple-400">{f'{pct_paq}%' if pct_paq is not None else '—'}</span></span>
     </div>
     <p class="text-[8px] text-gray-600 mt-1">Rutas en tiempo (3h local / 5h paq)</p>
   </div>
@@ -1801,6 +1815,59 @@ function actualizarPromedioGlobal() {{
   el.innerText = prom + '%';
   el.className = 'text-2xl font-black font-custom ' + (prom>=80?'text-emerald-400':prom>=60?'text-yellow-400':'text-rose-400');
   document.getElementById('kpi-mes-label').innerText = MESES_ES_JS[mes-1] + ' ' + anio;
+
+  // Incidencias abiertas, solo del mes seleccionado (no todas las históricas)
+  const incMes = INCIDENCIAS_DATA.filter(i => i.estatus === 'Abierta' && i.anio === anio && i.mes === mes).length;
+  const elInc = document.getElementById('kpi-inc-abiertas');
+  if (elInc) elInc.innerText = incMes;
+}}
+
+// ── Meta Preparación: desglose por mes seleccionado ────────────────────────
+function actualizarMetaPrep() {{
+  const sel = document.getElementById('prep-mes-selector').value;
+  if (!sel || sel === 'Sin datos') return;
+  const [anio, mes] = sel.split('-').map(Number);
+  const horasMes = HORAS_DATA.filter(h => h.anio === anio && h.mes === mes && h.minutos_prep !== null && h.minutos_prep !== undefined);
+
+  const totalH  = horasMes.length;
+  const enMeta  = horasMes.filter(h => h.efic_prep !== null && h.efic_prep !== undefined && h.efic_prep >= 100).length;
+  const pctCump = totalH > 0 ? Math.round((enMeta/totalH)*1000)/10 : null;
+
+  const localH = horasMes.filter(h => (h.colaborador||'').toUpperCase() !== 'ALMACEN');
+  const paqH   = horasMes.filter(h => (h.colaborador||'').toUpperCase() === 'ALMACEN');
+  const localOk = localH.filter(h => h.efic_prep !== null && h.efic_prep !== undefined && h.efic_prep >= 100).length;
+  const paqOk   = paqH.filter(h => h.efic_prep !== null && h.efic_prep !== undefined && h.efic_prep >= 100).length;
+  const pctLocal = localH.length ? Math.round((localOk/localH.length)*1000)/10 : null;
+  const pctPaq   = paqH.length   ? Math.round((paqOk/paqH.length)*1000)/10     : null;
+
+  const avgMins = arr => arr.length ? arr.reduce((a,b)=>a+b.minutos_prep,0)/arr.length : null;
+  const minsAHms = m => {{
+    if (m === null || m === undefined) return '—';
+    const h = Math.floor(m/60), mi = Math.round(m%60);
+    return String(h).padStart(2,'0') + ':' + String(mi).padStart(2,'0') + ':00';
+  }};
+  const colorFor = p => p===null ? 'text-gray-400' : p>=80  ? 'text-emerald-400' : p>=60 ? 'text-yellow-400' : 'text-rose-400';
+  const bgFor    = p => p===null ? 'bg-gray-800'   : p>=100 ? 'bg-emerald-500'   : p>=80 ? 'bg-yellow-500'  : 'bg-rose-500';
+  const pctTxt   = p => p!==null ? p+'%' : '—';
+
+  const valorEl = document.getElementById('prep-pct-valor');
+  valorEl.innerText = pctTxt(pctCump);
+  valorEl.className = 'text-2xl font-black font-custom ' + colorFor(pctCump);
+  document.getElementById('prep-pct-local').innerText = pctTxt(pctLocal);
+  document.getElementById('prep-pct-paq').innerText   = pctTxt(pctPaq);
+
+  document.getElementById('prep-modal-label').innerText = `Registros de ${{MESES_ES_JS[mes-1]}} ${{anio}}`;
+  document.getElementById('prep-avg-local').innerText   = minsAHms(avgMins(localH));
+  document.getElementById('prep-avg-paq').innerText     = minsAHms(avgMins(paqH));
+  document.getElementById('prep-rutas-local').innerText = `${{localOk}}/${{localH.length}}`;
+  document.getElementById('prep-rutas-paq').innerText   = `${{paqOk}}/${{paqH.length}}`;
+
+  const badgeLocal = document.getElementById('prep-badge-local');
+  badgeLocal.innerText = pctTxt(pctLocal);
+  badgeLocal.className = 'font-black text-sm px-3 py-1 rounded-lg text-white ' + bgFor(pctLocal);
+  const badgePaq = document.getElementById('prep-badge-paq');
+  badgePaq.innerText = pctTxt(pctPaq);
+  badgePaq.className = 'font-black text-sm px-3 py-1 rounded-lg text-white ' + bgFor(pctPaq);
 }}
 
 // ── Tarjetas equipo ───────────────────────────────────────────────────────
@@ -2091,6 +2158,8 @@ window.addEventListener('DOMContentLoaded', () => {{
   switchTab('evaluacion');
   iniciarCalendarioKpi();
   renderSeleccionColabs();
+  actualizarPromedioGlobal();
+  actualizarMetaPrep();
 }});
 
 // ── Calendario evaluación ─────────────────────────────────────────────────
