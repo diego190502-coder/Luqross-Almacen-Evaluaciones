@@ -73,7 +73,9 @@ def init_db():
             nombre TEXT PRIMARY KEY,
             puesto TEXT,
             actividades JSONB,
-            activo BOOLEAN DEFAULT TRUE
+            activo BOOLEAN DEFAULT TRUE,
+            foto_data BYTEA,
+            foto_tipo TEXT
         );
         CREATE TABLE IF NOT EXISTS evaluaciones (
             id SERIAL PRIMARY KEY,
@@ -99,7 +101,9 @@ def init_db():
             solucion TEXT,
             resuelto_por TEXT,
             fecha_resolucion TEXT,
-            foto TEXT
+            foto TEXT,
+            foto_data BYTEA,
+            foto_tipo TEXT
         );
         CREATE TABLE IF NOT EXISTS horas (
             id SERIAL PRIMARY KEY,
@@ -134,6 +138,18 @@ def init_db():
     # (bases de datos creadas antes de este cambio no la tienen).
     cur.execute("ALTER TABLE colaboradores ADD COLUMN IF NOT EXISTS activo BOOLEAN DEFAULT TRUE;")
     cur.execute("UPDATE colaboradores SET activo=TRUE WHERE activo IS NULL;")
+
+    # Migración: fotos ahora se guardan en la base de datos (antes se guardaban
+    # como archivo en el disco del contenedor, que Railway borra en cada
+    # despliegue — por eso las fotos ya subidas se veían como ícono roto).
+    cur.execute("ALTER TABLE colaboradores ADD COLUMN IF NOT EXISTS foto_data BYTEA;")
+    cur.execute("ALTER TABLE colaboradores ADD COLUMN IF NOT EXISTS foto_tipo TEXT;")
+    cur.execute("ALTER TABLE incidencias  ADD COLUMN IF NOT EXISTS foto_data BYTEA;")
+    cur.execute("ALTER TABLE incidencias  ADD COLUMN IF NOT EXISTS foto_tipo TEXT;")
+    # Las fotos de incidencias subidas antes de este cambio apuntaban a un archivo
+    # en disco que ya no existe (se perdió en el despliegue) — se limpia la
+    # referencia para que la tarjeta muestre "sin foto" en vez de un ícono roto.
+    cur.execute("UPDATE incidencias SET foto=NULL WHERE foto LIKE '/static/incidencias/%';")
     conn.commit()
     cur.close()
     conn.close()
@@ -273,9 +289,18 @@ def reactivar_colab(nombre:str):
 
 @app.post("/api/colaborador/{nombre}/foto")
 async def subir_foto(nombre:str, file:UploadFile=File(...)):
-    path=f"static/fotos/{nombre}.jpg"
-    with open(path,"wb") as b: b.write(await file.read())
+    contenido = await file.read()
+    tipo = file.content_type or "image/jpeg"
+    db_exec("UPDATE colaboradores SET foto_data=%s, foto_tipo=%s WHERE nombre=%s",
+            (psycopg2.Binary(contenido), tipo, nombre.strip()))
     return {"ok":True}
+
+@app.get("/foto-colaborador/{nombre}")
+def foto_colaborador(nombre: str):
+    r = db_fetch("SELECT foto_data, foto_tipo FROM colaboradores WHERE nombre=%s", (nombre,))
+    if not r or not r[0].get("foto_data"):
+        raise HTTPException(status_code=404, detail="Sin foto")
+    return Response(content=bytes(r[0]["foto_data"]), media_type=r[0].get("foto_tipo") or "image/jpeg")
 
 @app.put("/api/colaborador/{nombre}/actividades")
 def update_actividades(nombre:str, body:dict):
@@ -306,9 +331,9 @@ def backup():
     o necesitas recuperar información."""
     datos = {
         "generado": datetime.now().strftime("%d/%m/%Y %H:%M"),
-        "colaboradores": db_fetch("SELECT * FROM colaboradores ORDER BY nombre"),
+        "colaboradores": db_fetch("SELECT nombre, puesto, actividades, activo FROM colaboradores ORDER BY nombre"),
         "evaluaciones": db_fetch("SELECT * FROM evaluaciones ORDER BY anio,mes,dia"),
-        "incidencias": db_fetch("SELECT * FROM incidencias ORDER BY id"),
+        "incidencias": db_fetch("SELECT id, fecha, colaborador, tipo, responsable, ingresado_por, observaciones, estatus, solucion, resuelto_por, fecha_resolucion, foto FROM incidencias ORDER BY id"),
         "horas": db_fetch("SELECT * FROM horas ORDER BY id"),
         "tiempos": db_fetch("SELECT * FROM tiempos ORDER BY id"),
     }
@@ -330,7 +355,7 @@ def exportar_evaluaciones(anio: int, mes: int):
                 "Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"]
     nombre_mes = MESES_ES[mes-1]
 
-    colaboradores = db_fetch("SELECT * FROM colaboradores ORDER BY nombre")
+    colaboradores = db_fetch("SELECT nombre, puesto, actividades, activo FROM colaboradores ORDER BY nombre")
     for c in colaboradores:
         if isinstance(c.get("actividades"), str):
             c["actividades"] = json.loads(c["actividades"])
@@ -569,7 +594,7 @@ async def importar_excel(file: UploadFile = File(...)):
     import pandas as pd
     try:
         xls = pd.ExcelFile(file.file, engine="openpyxl")
-        colaboradores = db_fetch("SELECT * FROM colaboradores")
+        colaboradores = db_fetch("SELECT nombre, puesto, actividades, activo FROM colaboradores")
         for c in colaboradores:
             if isinstance(c.get("actividades"), str):
                 c["actividades"] = json.loads(c["actividades"])
@@ -695,12 +720,19 @@ def guardar_inc(i:Incidencia):
 
 @app.post("/api/incidencia/{inc_id}/foto")
 async def subir_foto_incidencia(inc_id: int, file: UploadFile = File(...)):
-    ext = os.path.splitext(file.filename)[1].lower() or ".jpg"
-    path = f"static/incidencias/{inc_id}{ext}"
-    with open(path, "wb") as b: b.write(await file.read())
-    foto_url = f"/static/incidencias/{inc_id}{ext}"
-    db_exec("UPDATE incidencias SET foto=%s WHERE id=%s", (foto_url, inc_id))
+    contenido = await file.read()
+    tipo = file.content_type or "image/jpeg"
+    foto_url = f"/foto-incidencia/{inc_id}"
+    db_exec("UPDATE incidencias SET foto=%s, foto_data=%s, foto_tipo=%s WHERE id=%s",
+            (foto_url, psycopg2.Binary(contenido), tipo, inc_id))
     return {"ok": True, "foto": foto_url}
+
+@app.get("/foto-incidencia/{inc_id}")
+def foto_incidencia(inc_id: int):
+    r = db_fetch("SELECT foto_data, foto_tipo FROM incidencias WHERE id=%s", (inc_id,))
+    if not r or not r[0].get("foto_data"):
+        raise HTTPException(status_code=404, detail="Sin foto")
+    return Response(content=bytes(r[0]["foto_data"]), media_type=r[0].get("foto_tipo") or "image/jpeg")
 
 @app.patch("/api/incidencia/{inc_id}/resolver")
 def resolver_inc(inc_id:int, body:dict={}):
@@ -801,7 +833,7 @@ def guardar_tiempo(t:Tiempo):
 # ── Página principal ───────────────────────────────────────────────────────
 @app.get("/", response_class=HTMLResponse)
 def pagina():
-    colaboradores = db_fetch("SELECT * FROM colaboradores ORDER BY nombre")
+    colaboradores = db_fetch("SELECT nombre, puesto, actividades, activo FROM colaboradores ORDER BY nombre")
     for c in colaboradores:
         if isinstance(c.get("actividades"), str):
             c["actividades"] = json.loads(c["actividades"])
@@ -816,7 +848,7 @@ def pagina():
         if isinstance(e.get("calificaciones"), str):
             e["calificaciones"] = json.loads(e["calificaciones"])
 
-    incidencias = db_fetch("SELECT * FROM incidencias ORDER BY id DESC")
+    incidencias = db_fetch("SELECT id, fecha, colaborador, tipo, responsable, ingresado_por, observaciones, estatus, solucion, resuelto_por, fecha_resolucion, foto FROM incidencias ORDER BY id DESC")
     for inc in incidencias:
         inc["colaboradores"] = parse_colabs(inc.get("colaborador"))
         a, m = fecha_anio_mes(inc.get("fecha"))
@@ -913,7 +945,7 @@ def pagina():
                 solucion_html=f'<div class="mt-1 text-[9px] text-emerald-300/70 italic max-w-[120px] truncate" title="{inc["solucion"]}">💬 {inc["solucion"][:40]}...</div>' if len(inc.get("solucion",""))>40 else f'<div class="mt-1 text-[9px] text-emerald-300/70 italic">💬 {inc["solucion"]}</div>'
             foto_html=""
             if inc.get("foto"):
-                foto_html=f'<img src="{inc["foto"]}" onclick="verFotoInc(\'{inc["foto"]}\')" class="w-10 h-10 object-cover rounded-lg border border-gray-700 cursor-pointer hover:scale-110 transition-transform shadow" title="Ver foto">'
+                foto_html=f'<img src="{inc["foto"]}" onclick="verFotoInc(\'{inc["foto"]}\')" onerror="this.outerHTML=\'<span class=&quot;text-gray-700 text-[10px]&quot;>—</span>\'" class="w-10 h-10 object-cover rounded-lg border border-gray-700 cursor-pointer hover:scale-110 transition-transform shadow" title="Ver foto">'
             else:
                 foto_html='<span class="text-gray-700 text-[10px]">—</span>'
             filas_inc+=f"""<tr class="border-b border-gray-800 hover:bg-gray-900/30 text-xs transition-colors" data-ingresado="{inc.get('ingresado_por','')}">
@@ -1732,7 +1764,7 @@ input[type=range]{{accent-color:#eab308;}}
     <div onclick="abrirHistorial('{js_str(c['nombre'])}')" class="bg-gray-900/30 border border-gray-800 rounded-2xl p-4 space-y-3 shadow cursor-pointer hover:border-yellow-500/40 hover:bg-gray-900/50 transition-all duration-200 group">
       <div class="flex items-center gap-3">
         <div class="relative">
-          <img src="/static/fotos/{c['nombre']}.jpg" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" class="w-20 h-20 rounded-full object-cover border-2 border-yellow-500/40 shadow group-hover:border-yellow-500 transition-colors">
+          <img src="/foto-colaborador/{c['nombre']}" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" class="w-20 h-20 rounded-full object-cover border-2 border-yellow-500/40 shadow group-hover:border-yellow-500 transition-colors">
           <div class="w-20 h-20 rounded-full bg-yellow-500/10 border-2 border-yellow-500/30 items-center justify-center text-yellow-500 font-black text-2xl hidden" style="display:none">{c['nombre'][0].upper()}</div>
           <label onclick="event.stopPropagation()" class="absolute -bottom-1 -right-1 bg-gray-800 hover:bg-yellow-500 text-gray-400 hover:text-gray-900 border border-gray-700 rounded-full w-5 h-5 flex items-center justify-center cursor-pointer transition-colors text-[10px]" title="Cambiar foto">
             📷<input type="file" accept=".jpg,.jpeg,.png" onchange="subirFoto('{js_str(c['nombre'])}',this)" class="hidden">
@@ -1912,7 +1944,7 @@ function renderTarjetasEquipo() {{
       container.innerHTML += `
       <div class="bg-gray-900/60 border border-gray-700 rounded-2xl p-4 space-y-3">
         <div class="flex items-center gap-3">
-          <img src="/static/fotos/${{colab.nombre}}.jpg"
+          <img src="/foto-colaborador/${{colab.nombre}}"
             onerror="this.style.display='none';this.nextElementSibling.style.display='flex'"
             class="w-16 h-16 rounded-full object-cover border-2 border-yellow-500/40 shrink-0">
           <div class="w-16 h-16 rounded-full bg-yellow-500/10 border-2 border-yellow-500/30 items-center justify-center text-yellow-500 font-black text-2xl shrink-0" style="display:none">${{colab.nombre[0]}}</div>
@@ -2001,7 +2033,7 @@ function abrirHistorial(nombre) {{
 
   const foto = document.getElementById('mh-foto');
   const init = document.getElementById('mh-init');
-  foto.src = `/static/fotos/${{nombre}}.jpg`;
+  foto.src = `/foto-colaborador/${{nombre}}`;
   foto.style.display = 'block'; init.style.display = 'none';
   init.innerText = nombre[0].toUpperCase();
   document.getElementById('mh-nombre').innerText = nombre;
@@ -2141,7 +2173,7 @@ function actualizarFotoEval() {{
   const img  = document.getElementById('eval-foto-img');
   const init = document.getElementById('eval-foto-init');
   const badge = document.getElementById('eval-foto-badge');
-  img.src = `/static/fotos/${{nombre}}.jpg`;
+  img.src = `/foto-colaborador/${{nombre}}`;
   img.style.display = 'block';
   init.style.display = 'none';
   init.innerText = nombre[0].toUpperCase();
@@ -2200,7 +2232,7 @@ function renderSeleccionColabs() {{
       ${{activos.map(c => `
         <div onclick="seleccionarColabEval('${{js_str_js(c.nombre)}}')" class="bg-gray-900/30 border border-gray-800 rounded-xl p-3 flex flex-col items-center gap-2 cursor-pointer hover:border-yellow-500/40 hover:bg-gray-900/50 transition-all">
           <div class="relative w-14 h-14">
-            <img src="/static/fotos/${{c.nombre}}.jpg" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" class="w-14 h-14 rounded-full object-cover border-2 border-yellow-500/40">
+            <img src="/foto-colaborador/${{c.nombre}}" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" class="w-14 h-14 rounded-full object-cover border-2 border-yellow-500/40">
             <div class="w-14 h-14 rounded-full bg-yellow-500/10 border-2 border-yellow-500/30 items-center justify-center text-yellow-500 font-black text-lg hidden absolute inset-0" style="display:none">${{c.nombre[0].toUpperCase()}}</div>
           </div>
           <p class="text-[10px] font-bold text-white text-center uppercase leading-tight">${{c.nombre}}</p>
@@ -2431,7 +2463,7 @@ function verTarjeta() {{
   document.getElementById('modal-tarjeta-body').innerHTML=`
     <div class="space-y-4">
       <div class="flex items-center gap-4">
-        <img src="/static/fotos/${{nombre}}.jpg" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" 
+        <img src="/foto-colaborador/${{nombre}}" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'"
           class="w-20 h-20 rounded-xl object-cover border-2 border-yellow-500/40 shadow-lg">
         <div class="w-20 h-20 rounded-xl bg-yellow-500/10 border-2 border-yellow-500/30 items-center justify-center text-yellow-500 font-black text-3xl hidden">${{nombre[0].toUpperCase()}}</div>
         <div>
