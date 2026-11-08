@@ -1347,7 +1347,9 @@ input[type=range]{{accent-color:#eab308;}}
     <div class="flex justify-between items-center border-b border-gray-800 pb-2">
       <h3 class="text-xs font-bold text-gray-400 font-custom uppercase">Matriz de Evaluación Diaria</h3>
       <div class="flex gap-2 flex-wrap items-center">
-        <button onclick="marcarHoyExcelente()" class="text-[9px] px-2 py-1 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/20 font-bold uppercase transition-colors">✓ Marcar hoy como Excelente</button>
+        <button onclick="seleccionarTodosDias()" class="text-[9px] px-2 py-1 rounded bg-gray-800/60 text-gray-300 border border-gray-700 hover:bg-gray-800 font-bold uppercase transition-colors">Todos</button>
+        <button onclick="deseleccionarTodosDias()" class="text-[9px] px-2 py-1 rounded bg-gray-800/60 text-gray-300 border border-gray-700 hover:bg-gray-800 font-bold uppercase transition-colors">Ninguno</button>
+        <button onclick="marcarSeleccionadosExcelente()" class="text-[9px] px-2 py-1 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/20 font-bold uppercase transition-colors">✓ Marcar seleccionados como Excelente (<span id="dias-sel-count">0</span>)</button>
         <span class="text-[9px] px-2 py-0.5 rounded score-badge-5 font-bold">5 Excelente</span>
         <span class="text-[9px] px-2 py-0.5 rounded score-badge-4 font-bold">4 Satisfactorio</span>
         <span class="text-[9px] px-2 py-0.5 rounded score-badge-3 font-bold">3 En observación</span>
@@ -2088,15 +2090,76 @@ function switchTab(name) {{
 window.addEventListener('DOMContentLoaded', () => {{
   switchTab('evaluacion');
   iniciarCalendarioKpi();
+  renderSeleccionColabs();
 }});
 
 // ── Calendario evaluación ─────────────────────────────────────────────────
 let evalData = {{}};  // dia -> {{ actividad -> score }}
+let diasSeleccionados = new Set();  // días marcados con el checkbox del encabezado
+
+function actualizarContadorDiasSel() {{
+  const el = document.getElementById('dias-sel-count');
+  if (el) el.innerText = diasSeleccionados.size;
+}}
+
+function toggleDiaSel(dia, checked) {{
+  if (checked) diasSeleccionados.add(dia); else diasSeleccionados.delete(dia);
+  actualizarContadorDiasSel();
+}}
+
+function seleccionarTodosDias() {{
+  document.querySelectorAll('.dia-chk').forEach(chk => {{ chk.checked = true; diasSeleccionados.add(Number(chk.dataset.dia)); }});
+  actualizarContadorDiasSel();
+}}
+
+function deseleccionarTodosDias() {{
+  document.querySelectorAll('.dia-chk').forEach(chk => {{ chk.checked = false; }});
+  diasSeleccionados.clear();
+  actualizarContadorDiasSel();
+}}
+
+function renderSeleccionColabs() {{
+  const activos = COLABS_DATA.filter(c => c.activo !== false);
+  const cont = document.getElementById('cal-container');
+  if (!activos.length) {{
+    cont.innerHTML = '<p class="text-xs text-gray-500 text-center py-8">No hay colaboradores activos todavía.</p>';
+    return;
+  }}
+  cont.innerHTML = `
+    <p class="text-[10px] text-gray-500 mb-3">Elige a quién vas a evaluar:</p>
+    <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
+      ${{activos.map(c => `
+        <div onclick="seleccionarColabEval('${{js_str_js(c.nombre)}}')" class="bg-gray-900/30 border border-gray-800 rounded-xl p-3 flex flex-col items-center gap-2 cursor-pointer hover:border-yellow-500/40 hover:bg-gray-900/50 transition-all">
+          <div class="relative w-14 h-14">
+            <img src="/static/fotos/${{c.nombre}}.jpg" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" class="w-14 h-14 rounded-full object-cover border-2 border-yellow-500/40">
+            <div class="w-14 h-14 rounded-full bg-yellow-500/10 border-2 border-yellow-500/30 items-center justify-center text-yellow-500 font-black text-lg hidden absolute inset-0" style="display:none">${{c.nombre[0].toUpperCase()}}</div>
+          </div>
+          <p class="text-[10px] font-bold text-white text-center uppercase leading-tight">${{c.nombre}}</p>
+        </div>
+      `).join('')}}
+    </div>`;
+}}
+
+function js_str_js(s) {{
+  return String(s).replace(/\\\\/g,"\\\\\\\\").replace(/'/g,"\\\\'");
+}}
+
+function seleccionarColabEval(nombre) {{
+  document.getElementById('eval-colab-sel').value = nombre;
+  cargarCalendario();
+  actualizarFotoEval();
+}}
 
 function cargarCalendario() {{
   const nombre = document.getElementById('eval-colab-sel').value;
   const mes    = document.getElementById('eval-mes').value;
-  if (!nombre || !mes) return;
+  diasSeleccionados = new Set();
+  actualizarContadorDiasSel();
+  if (!nombre || !mes) {{
+    renderSeleccionColabs();
+    document.getElementById('btn-guardar-eval').classList.add('hidden');
+    return;
+  }}
 
   const [anio, mesN] = mes.split('-').map(Number);
   const colab   = COLABS.find(c => c.nombre === nombre);
@@ -2111,24 +2174,22 @@ function cargarCalendario() {{
   renderTablaCalendario(anio, mesN, colab);
 }}
 
-function marcarHoyExcelente() {{
+function marcarSeleccionadosExcelente() {{
   const nombre = document.getElementById('eval-colab-sel').value;
   const mes    = document.getElementById('eval-mes').value;
   if (!nombre || !mes) {{ showRes('res-eval','⚠ Selecciona colaborador y mes.','err'); return; }}
+  if (diasSeleccionados.size === 0) {{ showRes('res-eval','⚠ Marca al menos un día con la casilla en el encabezado de la tabla.','err'); return; }}
   const [anio, mesN] = mes.split('-').map(Number);
-  const hoy = new Date();
-  if (hoy.getFullYear()!==anio || hoy.getMonth()+1!==mesN) {{
-    showRes('res-eval','⚠ Este botón solo marca el día de hoy — cambia el mes al actual para usarlo.','err');
-    return;
-  }}
   const colab = COLABS.find(c => c.nombre === nombre);
   if (!colab) return;
-  const dia = hoy.getDate();
   const acts = colab.actividades || [];
   if (!acts.length) return;
-  if (!confirm(`¿Marcar las ${{acts.length}} actividades de hoy (día ${{dia}}) como Excelente (5)? Luego puedes bajar las que necesiten ajuste, antes de guardar.`)) return;
-  if (!evalData[dia]) evalData[dia] = {{}};
-  acts.forEach(act => {{ evalData[dia][act] = 5; }});
+  const dias = Array.from(diasSeleccionados).sort((a,b)=>a-b);
+  if (!confirm(`¿Marcar las ${{acts.length}} actividades de ${{dias.length}} día(s) (${{dias.join(', ')}}) como Excelente (5)? Luego puedes bajar las que necesiten ajuste, antes de guardar.`)) return;
+  dias.forEach(dia => {{
+    if (!evalData[dia]) evalData[dia] = {{}};
+    acts.forEach(act => {{ evalData[dia][act] = 5; }});
+  }});
   renderTablaCalendario(anio, mesN, colab);
 }}
 
@@ -2151,6 +2212,7 @@ function renderTablaCalendario(anio, mesN, colab) {{
     const esHoy = (d===hoy.getDate()&&mesN===hoy.getMonth()+1&&anio===hoy.getFullYear());
     const esSab = dow === 6;
     headerDias += `<th class="cal-cell ${{esHoy?'bg-yellow-500/20 text-yellow-400':esSab?'bg-blue-900/20 text-blue-400':'bg-gray-900 text-gray-400'}} font-bold">
+      <input type="checkbox" class="dia-chk accent-emerald-500 mb-0.5" data-dia="${{d}}" onchange="toggleDiaSel(${{d}}, this.checked)" ${{diasSeleccionados.has(d)?'checked':''}}>
       <div>${{d}}</div><div class="text-[8px]">${{DIAS_SEM[dow]}}</div>
     </th>`;
   }});
@@ -2190,12 +2252,14 @@ function renderTablaCalendario(anio, mesN, colab) {{
     </table>`;
 
   document.getElementById('btn-guardar-eval').classList.remove('hidden');
+  actualizarContadorDiasSel();
 }}
 
 function ciclarScore(td, dia, actividad) {{
   if (!evalData[dia]) evalData[dia] = {{}};
-  const actual = evalData[dia][actividad] ?? -1;
-  const nuevo  = (actual + 1) % 6;
+  const actual = evalData[dia][actividad];
+  // Empieza en 5 (Excelente) y de ahí va bajando con cada clic: 5,4,3,2,1,0,5,...
+  const nuevo  = (actual === undefined || actual === null) ? 5 : (actual + 5) % 6;
   evalData[dia][actividad] = nuevo;
   const div = td.querySelector('div');
   div.className = `rounded text-[10px] font-black py-0.5 px-1 score-badge-${{nuevo}}`;
