@@ -235,6 +235,7 @@ class Incidencia(BaseModel):
     responsable: str
     ingresado_por: Optional[str] = ""
     observaciones: Optional[str] = ""
+    fecha: Optional[str] = ""  # "YYYY-MM-DD" si se registra en otra fecha; vacío = hoy
 
 class RegistroHoras(BaseModel):
     colaborador: str
@@ -712,9 +713,22 @@ def guardar_inc(i:Incidencia):
     if not colabs:
         raise HTTPException(status_code=400, detail="Selecciona al menos un colaborador.")
     tipo_final = i.tipo_personalizado.strip() if i.tipo == "Otro" and i.tipo_personalizado else i.tipo
+
+    # Si mandan una fecha (YYYY-MM-DD, de un <input type="date">) se usa esa,
+    # para poder registrar incidencias de días anteriores que se pasaron por
+    # alto; si no, se usa el momento actual. La hora siempre es la de ahora.
+    hora_actual = datetime.now().strftime("%H:%M")
+    fecha_final = datetime.now().strftime("%d/%m/%Y")
+    if i.fecha:
+        try:
+            fecha_final = datetime.strptime(i.fecha.strip(), "%Y-%m-%d").strftime("%d/%m/%Y")
+        except ValueError:
+            pass
+    fecha_hora = f"{fecha_final} {hora_actual}"
+
     r = db_exec("""INSERT INTO incidencias (fecha,colaborador,tipo,responsable,ingresado_por,observaciones,estatus)
                    VALUES (%s,%s,%s,%s,%s,%s,'Abierta') RETURNING id""",
-                (datetime.now().strftime("%d/%m/%Y %H:%M"), json.dumps(colabs), tipo_final,
+                (fecha_hora, json.dumps(colabs), tipo_final,
                  i.responsable, i.ingresado_por, i.observaciones))
     return {"ok":True, "id": r["id"] if r else 0}
 
@@ -1445,6 +1459,11 @@ input[type=range]{{accent-color:#eab308;}}
       <div id="inc-tipo-custom-box" class="hidden">
         <label class="lbl">Especifica la incidencia</label>
         <input id="inc-tipo-custom" class="field" placeholder="Describe el tipo de incidencia...">
+      </div>
+      <div>
+        <label class="lbl">Fecha de la Incidencia</label>
+        <input id="inc-fecha" type="date" class="field" value="{datetime.now().strftime('%Y-%m-%d')}" max="{datetime.now().strftime('%Y-%m-%d')}">
+        <p class="text-[9px] text-gray-600 mt-1">Por defecto es hoy — cámbiala si la incidencia pasó otro día y se te pasó registrarla.</p>
       </div>
       <div><label class="lbl">Responsable que Reporta</label><input id="inc-resp" class="field" placeholder="Nombre del supervisor"></div>
       <div><label class="lbl">Observaciones</label><textarea id="inc-obs" rows="3" class="field resize-none" placeholder="Describe la incidencia..."></textarea></div>
@@ -2595,7 +2614,8 @@ async function guardarInc() {{
   const payload = {{
     colaboradores: colabs, tipo, tipo_personalizado: tipoCustom,
     responsable: resp, ingresado_por: ingresadoPor,
-    observaciones: document.getElementById('inc-obs').value
+    observaciones: document.getElementById('inc-obs').value,
+    fecha: document.getElementById('inc-fecha').value
   }};
   const r = await fetch('/api/incidencia',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(payload)}});
   if (!r.ok) {{ showRes('res-inc','⚠ Error al guardar.','err'); return; }}
