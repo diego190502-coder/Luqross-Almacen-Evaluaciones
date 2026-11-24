@@ -44,7 +44,105 @@ LOGO_FILE  = "logo.png"
 
 ESCALA = {0:"Crítico",1:"Insuficiente",2:"Necesita mejora",3:"En observación",4:"Satisfactorio",5:"Excelente"}
 TIPOS_INC = ["Falta","Retardo","Permiso","Accidente","Conducta","Material Sucio","Material Incompleto","Mal Etiquetado","Otro"]
-TIPOS_PUESTO = ["ALMACENISTA","CHOFER","BECARIA","Otro"]
+TIPOS_PUESTO = ["Coordinación de Logística y Almacén","Auxiliar de almacén y logística",
+                "Supervisor de Piso","Analista de almacén y operaciones",
+                "Chófer Almacenista A","Chófer Almacenista B",
+                "Auxiliar de Almacén A","Auxiliar de Almacén B","Otro"]
+
+# Actividades sugeridas por puesto, tomadas de las Descripciones de Puesto (DP)
+# oficiales de Grupo Luqross (sección "3.1 Actividades" de cada DP). Sirven como
+# punto de partida al dar de alta/editar a un colaborador — el usuario puede
+# agregarlas con un botón y seguir editando libremente; no se borra nada solo.
+PUESTO_ACTIVIDADES_SUGERIDAS = {
+    "Coordinación de Logística y Almacén": [
+        "Supervisión de la operación diaria del almacén",
+        "Planeación y validación de rutas diarias",
+        "Supervisión de embalaje y etiquetado de pedidos",
+        "Verificación de validaciones para salida de material",
+        "Coordinación y validación de conteos de inventario",
+        "Supervisión del estado físico y mecánico de unidades",
+        "Monitoreo de unidades en ruta",
+        "Elaboración de reportes de rendimiento del almacén",
+        "Actualización de documentación del área",
+        "Supervisión de limpieza, orden y seguridad",
+    ],
+    "Auxiliar de almacén y logística": [
+        "Control de inventario en el ERP (entradas, salidas, ajustes)",
+        "Gestión de órdenes de compra",
+        "Alta y actualización de productos en el ERP",
+        "Coordinación de conteos cíclicos y físicos",
+        "Verificación de trazabilidad de productos",
+        "Validación de pedidos antes del despacho",
+        "Organización de rutas de entrega",
+        "Monitoreo de indicadores de desempeño",
+        "Registro y seguimiento de incidencias",
+        "Elaboración de reportes de inventario",
+        "Supervisión y evaluación del personal a cargo",
+    ],
+    "Supervisor de Piso": [
+        "Supervisión y asignación de actividades diarias del personal",
+        "Captura de rutas del día en el sistema",
+        "Verificación de calidad en recepción y despacho",
+        "Orden, acomodo y control del almacén",
+        "Validación de captura y seguimiento de pedidos",
+        "Coordinación de recepción de materiales",
+        "Gestión de salidas bajo metodología PEPS",
+        "Supervisión de conteos cíclicos e inventarios",
+        "Control de materiales obsoletos o dañados",
+        "Coordinación de embarques y unidades",
+        "Evaluación del desempeño del personal de almacén",
+    ],
+    "Analista de almacén y operaciones": [
+        "Control de entrada, resguardo y entrega de insumos",
+        "Actualización de registros e inventarios de insumos",
+        "Apoyo en la validación de pedidos",
+        "Registro de incidencias",
+        "Organización y resguardo de documentación",
+        "Apoyo en actividades administrativas",
+        "Seguimiento al mantenimiento de la flota vehicular",
+        "Procesamiento de compras operativas y de almacén",
+    ],
+    "Chófer Almacenista A": [
+        "Carga y descarga de mercancía",
+        "Conducción de unidad de carga pesada en ruta",
+        "Entrega puntual de pedidos",
+        "Verificación de documentación de entrega",
+        "Operación del montacargas",
+        "Revisión del estado de la unidad y el montacargas",
+        "Apoyo en inventarios y conteos",
+        "Cumplimiento de normas de seguridad vial e industrial",
+    ],
+    "Chófer Almacenista B": [
+        "Carga y descarga de mercancía",
+        "Conducción de unidad de carga ligera o mediana en ruta",
+        "Entrega de pedidos con documentación de soporte",
+        "Revisión del estado físico de la unidad",
+        "Reporte de incidencias de ruta o mercancía",
+        "Apoyo en estiba y resguardo de mercancía",
+        "Orden y limpieza del área de carga y la unidad",
+    ],
+    "Auxiliar de Almacén A": [
+        "Carga, descarga y estiba segura de mercancía",
+        "Operación correcta del montacargas",
+        "Acomodo de tarimas en áreas asignadas",
+        "Verificación de condiciones de la mercancía",
+        "Apoyo en inventarios físicos y conteos cíclicos",
+        "Apoyo en embalaje y preparación de pedidos",
+        "Orden y limpieza del área de trabajo",
+        "Reporte de incidencias en mercancía",
+        "Uso correcto del equipo de protección personal",
+    ],
+    "Auxiliar de Almacén B": [
+        "Carga, descarga y traslado de materiales",
+        "Recepción de mercancía (cantidades y condiciones)",
+        "Etiquetado correcto de productos",
+        "Acomodo de tarimas con material",
+        "Armado de pedidos conforme a la demanda",
+        "Apoyo en inventarios físicos y conteos cíclicos",
+        "Orden y limpieza del área de trabajo",
+        "Reporte de incidencias o irregularidades",
+    ],
+}
 ACTIVIDADES_HORAS = ["Hora de Conocimiento de Ruta","Hora de Entrega de Etiquetas",
                      "Hora de Término de Preparación","Hora de Entrega de Papeles",
                      "Hora de Salida","Hora de Llegada (Comida)"]
@@ -1280,7 +1378,10 @@ input[type=range]{{accent-color:#eab308;}}
         <input id="col-puesto-custom" class="field" placeholder="Ej. Supervisor">
       </div>
       <div>
-        <label class="lbl">Actividades a Evaluar (una por línea)</label>
+        <div class="flex items-center justify-between">
+          <label class="lbl mb-0">Actividades a Evaluar (una por línea)</label>
+          <button type="button" onclick="cargarActividadesSugeridas()" title="Agrega las actividades oficiales del descriptivo de puesto (DP) para los puestos marcados arriba, sin borrar lo que ya tengas escrito" class="text-[9px] text-yellow-500 hover:text-yellow-300 font-bold uppercase border border-yellow-500/40 rounded-lg px-2 py-1 whitespace-nowrap">📋 Cargar del descriptivo de puesto</button>
+        </div>
         <textarea id="col-actividades" rows="8" class="field resize-none" placeholder="ETIQUETADO CORRECTO&#10;PRODUCTO CORRECTO&#10;PREPARACIÓN DE PEDIDO&#10;..."></textarea>
       </div>
       <button id="btn-guardar-colab" onclick="guardarColab()" class="w-full bg-yellow-500 hover:bg-yellow-400 text-gray-950 font-black py-2.5 rounded-xl text-xs uppercase font-custom tracking-wider transition-colors">Agregar Colaborador</button>
@@ -1825,6 +1926,7 @@ const META_LOCAL = {META_LOCAL};
 const META_PAQ   = {META_PAQ};
 const PENALIZACION_POR_INCIDENCIA_PCT = {PENALIZACION_POR_INCIDENCIA_PCT};
 const TIPOS_PUESTO_JS = {json.dumps(TIPOS_PUESTO)};
+const PUESTO_ACTIVIDADES_JS = {json.dumps(PUESTO_ACTIVIDADES_SUGERIDAS)};
 const COLABS_DATA = COLABS;
 const EVALS_DATA  = EVALS;
 const MESES_ES_JS = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
@@ -2555,6 +2657,31 @@ function toggleTipoPuestoPersonalizado() {{
   const box = document.getElementById('col-puesto-custom-box');
   box.classList.toggle('hidden', !otroChecked);
   if (!otroChecked) document.getElementById('col-puesto-custom').value = '';
+}}
+
+// Agrega al textarea de actividades las actividades oficiales (del descriptivo
+// de puesto) de los tipos de puesto marcados, sin borrar ni duplicar nada de
+// lo que ya esté escrito — solo complementa.
+function cargarActividadesSugeridas() {{
+  const puestos = Array.from(document.querySelectorAll('.col-puesto-chk:checked')).map(el=>el.value);
+  if (!puestos.length) {{ showRes('res-colab','⚠ Marca primero al menos un tipo de puesto.','err'); return; }}
+  const ta = document.getElementById('col-actividades');
+  const actuales = ta.value.split('\\n').map(s=>s.trim()).filter(Boolean);
+  const actualesNorm = actuales.map(s=>s.toUpperCase());
+  let agregadas = 0;
+  puestos.forEach(p => {{
+    (PUESTO_ACTIVIDADES_JS[p]||[]).forEach(act => {{
+      if (!actualesNorm.includes(act.toUpperCase())) {{
+        actuales.push(act);
+        actualesNorm.push(act.toUpperCase());
+        agregadas++;
+      }}
+    }});
+  }});
+  ta.value = actuales.join('\\n');
+  if (agregadas) showRes('res-colab',`✓ Se agregaron ${{agregadas}} actividad(es) del descriptivo de puesto. Puedes editarlas antes de guardar.`,'ok');
+  else showRes('res-colab','Ya tenías todas las actividades oficiales de ese puesto — no se agregó nada nuevo.','ok');
+  document.getElementById('res-colab').classList.remove('hidden');
 }}
 
 function previsualizarFotoInc(input) {{
