@@ -171,6 +171,7 @@ def init_db():
             nombre TEXT PRIMARY KEY,
             puesto TEXT,
             actividades JSONB,
+            actividades_inactivas JSONB DEFAULT '[]'::jsonb,
             activo BOOLEAN DEFAULT TRUE,
             foto_data BYTEA,
             foto_tipo TEXT
@@ -242,6 +243,8 @@ def init_db():
     # despliegue — por eso las fotos ya subidas se veían como ícono roto).
     cur.execute("ALTER TABLE colaboradores ADD COLUMN IF NOT EXISTS foto_data BYTEA;")
     cur.execute("ALTER TABLE colaboradores ADD COLUMN IF NOT EXISTS foto_tipo TEXT;")
+    cur.execute("ALTER TABLE colaboradores ADD COLUMN IF NOT EXISTS actividades_inactivas JSONB DEFAULT '[]'::jsonb;")
+    cur.execute("UPDATE colaboradores SET actividades_inactivas='[]'::jsonb WHERE actividades_inactivas IS NULL;")
     cur.execute("ALTER TABLE incidencias  ADD COLUMN IF NOT EXISTS foto_data BYTEA;")
     cur.execute("ALTER TABLE incidencias  ADD COLUMN IF NOT EXISTS foto_tipo TEXT;")
     # Las fotos de incidencias subidas antes de este cambio apuntaban a un archivo
@@ -318,6 +321,7 @@ class Colaborador(BaseModel):
     puestos: List[str]
     puesto_personalizado: Optional[str] = ""
     actividades: List[str]
+    actividades_inactivas: Optional[List[str]] = []
 
 class EvalDia(BaseModel):
     colaborador: str
@@ -364,11 +368,13 @@ def add_colab(c: Colaborador):
         # INSERT ... ON CONFLICT: si el nombre ya existía (por ejemplo,
         # estaba desactivado), lo reactiva y actualiza sus datos en vez de
         # fallar por el nombre duplicado.
-        db_exec("""INSERT INTO colaboradores (nombre,puesto,actividades,activo)
-                   VALUES (%s,%s,%s,TRUE)
+        db_exec("""INSERT INTO colaboradores (nombre,puesto,actividades,actividades_inactivas,activo)
+                   VALUES (%s,%s,%s,%s,TRUE)
                    ON CONFLICT (nombre) DO UPDATE
-                   SET puesto=EXCLUDED.puesto, actividades=EXCLUDED.actividades, activo=TRUE""",
-                (c.nombre.strip(), json.dumps(puestos), json.dumps(c.actividades)))
+                   SET puesto=EXCLUDED.puesto, actividades=EXCLUDED.actividades,
+                       actividades_inactivas=EXCLUDED.actividades_inactivas, activo=TRUE""",
+                (c.nombre.strip(), json.dumps(puestos), json.dumps(c.actividades),
+                 json.dumps(c.actividades_inactivas or [])))
         return {"ok":True}
     except Exception as e:
         raise HTTPException(500, str(e))
@@ -430,7 +436,7 @@ def backup():
     o necesitas recuperar información."""
     datos = {
         "generado": datetime.now().strftime("%d/%m/%Y %H:%M"),
-        "colaboradores": db_fetch("SELECT nombre, puesto, actividades, activo FROM colaboradores ORDER BY nombre"),
+        "colaboradores": db_fetch("SELECT nombre, puesto, actividades, actividades_inactivas, activo FROM colaboradores ORDER BY nombre"),
         "evaluaciones": db_fetch("SELECT * FROM evaluaciones ORDER BY anio,mes,dia"),
         "incidencias": db_fetch("SELECT id, fecha, colaborador, tipo, responsable, ingresado_por, observaciones, estatus, solucion, resuelto_por, fecha_resolucion, foto FROM incidencias ORDER BY id"),
         "horas": db_fetch("SELECT * FROM horas ORDER BY id"),
@@ -454,7 +460,7 @@ def exportar_evaluaciones(anio: int, mes: int):
                 "Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"]
     nombre_mes = MESES_ES[mes-1]
 
-    colaboradores = db_fetch("SELECT nombre, puesto, actividades, activo FROM colaboradores ORDER BY nombre")
+    colaboradores = db_fetch("SELECT nombre, puesto, actividades, actividades_inactivas, activo FROM colaboradores ORDER BY nombre")
     for c in colaboradores:
         if isinstance(c.get("actividades"), str):
             c["actividades"] = json.loads(c["actividades"])
@@ -587,12 +593,17 @@ def exportar_evaluaciones(anio: int, mes: int):
         ws.row_dimensions[fila].height = 20
         fila += 1
 
-        # Obtener todas las actividades del colaborador
-        actividades = colab.get("actividades", [])
-        if not actividades:
-            for e in evals_colab:
-                actividades = list((e.get("calificaciones") or {}).keys())
-                if actividades: break
+        # Obtener todas las actividades del colaborador: las activas actuales,
+        # más cualquier actividad que ya no esté activa pero sí tenga
+        # calificaciones registradas ese mes (para no perder su historial del
+        # reporte solo porque después se haya desactivado).
+        actividades = list(colab.get("actividades", []) or [])
+        vistas = set(a.upper() for a in actividades)
+        for e in evals_colab:
+            for act_hist in (e.get("calificaciones") or {}).keys():
+                if act_hist.upper() not in vistas:
+                    vistas.add(act_hist.upper())
+                    actividades.append(act_hist)
 
         # Header tabla: Actividad | Día 1 | Día 2 | ... | Promedio
         dias_eval = sorted(set(e["dia"] for e in evals_colab))
@@ -693,7 +704,7 @@ async def importar_excel(file: UploadFile = File(...)):
     import pandas as pd
     try:
         xls = pd.ExcelFile(file.file, engine="openpyxl")
-        colaboradores = db_fetch("SELECT nombre, puesto, actividades, activo FROM colaboradores")
+        colaboradores = db_fetch("SELECT nombre, puesto, actividades, actividades_inactivas, activo FROM colaboradores")
         for c in colaboradores:
             if isinstance(c.get("actividades"), str):
                 c["actividades"] = json.loads(c["actividades"])
@@ -945,10 +956,14 @@ def guardar_tiempo(t:Tiempo):
 # ── Página principal ───────────────────────────────────────────────────────
 @app.get("/", response_class=HTMLResponse)
 def pagina():
-    colaboradores = db_fetch("SELECT nombre, puesto, actividades, activo FROM colaboradores ORDER BY nombre")
+    colaboradores = db_fetch("SELECT nombre, puesto, actividades, actividades_inactivas, activo FROM colaboradores ORDER BY nombre")
     for c in colaboradores:
         if isinstance(c.get("actividades"), str):
             c["actividades"] = json.loads(c["actividades"])
+        if isinstance(c.get("actividades_inactivas"), str):
+            c["actividades_inactivas"] = json.loads(c["actividades_inactivas"])
+        if c.get("actividades_inactivas") is None:
+            c["actividades_inactivas"] = []
         c["puestos"] = parse_lista_json(c.get("puesto"))
         if c.get("activo") is None:
             c["activo"] = True
@@ -1379,10 +1394,15 @@ input[type=range]{{accent-color:#eab308;}}
       </div>
       <div>
         <div class="flex items-center justify-between">
-          <label class="lbl mb-0">Actividades a Evaluar (una por línea)</label>
-          <button type="button" onclick="cargarActividadesSugeridas()" title="Agrega las actividades oficiales del descriptivo de puesto (DP) para los puestos marcados arriba, sin borrar lo que ya tengas escrito" class="text-[9px] text-yellow-500 hover:text-yellow-300 font-bold uppercase border border-yellow-500/40 rounded-lg px-2 py-1 whitespace-nowrap">📋 Cargar del descriptivo de puesto</button>
+          <label class="lbl mb-0">Actividades a Evaluar</label>
+          <button type="button" onclick="cargarActividadesSugeridas()" title="Agrega las actividades oficiales del descriptivo de puesto (DP) para los puestos marcados arriba, sin borrar ni desmarcar lo que ya tengas" class="text-[9px] text-yellow-500 hover:text-yellow-300 font-bold uppercase border border-yellow-500/40 rounded-lg px-2 py-1 whitespace-nowrap">📋 Cargar del descriptivo de puesto</button>
         </div>
-        <textarea id="col-actividades" rows="8" class="field resize-none" placeholder="ETIQUETADO CORRECTO&#10;PRODUCTO CORRECTO&#10;PREPARACIÓN DE PEDIDO&#10;..."></textarea>
+        <p class="text-[9px] text-gray-600 mb-1">Desmarca la casilla para dejar de evaluarla sin borrarla (puedes reactivarla cuando quieras); usa 🗑 solo si de verdad quieres eliminarla.</p>
+        <div id="col-actividades-list" class="field resize-none" style="max-height:220px;overflow-y:auto;display:flex;flex-direction:column;gap:4px;"></div>
+        <div class="flex gap-2 mt-2">
+          <input id="col-actividad-nueva" class="field" style="flex:1;" placeholder="Agregar actividad personalizada..." onkeydown="if(event.key==='Enter'){{event.preventDefault();agregarColabActManual();}}">
+          <button type="button" onclick="agregarColabActManual()" class="bg-gray-800 hover:bg-gray-700 text-yellow-500 font-black px-4 rounded-xl text-xs">+</button>
+        </div>
       </div>
       <button id="btn-guardar-colab" onclick="guardarColab()" class="w-full bg-yellow-500 hover:bg-yellow-400 text-gray-950 font-black py-2.5 rounded-xl text-xs uppercase font-custom tracking-wider transition-colors">Agregar Colaborador</button>
       <div id="res-colab" class="hidden p-2 text-center text-xs font-bold rounded-xl"></div>
@@ -2448,7 +2468,17 @@ function marcarSeleccionadosExcelente() {{
 
 function renderTablaCalendario(anio, mesN, colab) {{
   const diasMes = new Date(anio, mesN, 0).getDate();
-  const actividades = colab.actividades || [];
+  // Actividades activas + cualquiera ya desactivada que siga teniendo
+  // calificaciones guardadas este mes, para no perder su historial de vista.
+  // (copia con .slice() para no mutar colab.actividades, que se reutiliza
+  // en otras funciones como marcarSeleccionadosExcelente)
+  const actividades = (colab.actividades || []).slice();
+  const vistasAct = new Set(actividades);
+  Object.values(evalData).forEach(cals => {{
+    Object.keys(cals||{{}}).forEach(act => {{
+      if (!vistasAct.has(act)) {{ vistasAct.add(act); actividades.push(act); }}
+    }});
+  }});
 
   // Días de la semana — sin domingos (dow=0)
   const DIAS_SEM = ['D','L','M','M','J','V','S'];
@@ -2472,7 +2502,9 @@ function renderTablaCalendario(anio, mesN, colab) {{
 
   let filas = '';
   actividades.forEach(act => {{
-    let fila = `<td class="cal-cell bg-gray-950/60 text-gray-300 font-bold sticky left-0 z-10 text-left px-2 text-[10px] uppercase whitespace-nowrap">${{act}}</td>`;
+    const esInactiva = !(colab.actividades||[]).includes(act);
+    const etiqueta = esInactiva ? `${{act}} <span class="text-gray-600 normal-case">(inactiva)</span>` : act;
+    let fila = `<td class="cal-cell bg-gray-950/60 ${{esInactiva?'text-gray-500':'text-gray-300'}} font-bold sticky left-0 z-10 text-left px-2 text-[10px] uppercase whitespace-nowrap" title="${{esInactiva?'Ya no está activa para evaluarse, pero conserva su historial de este mes':''}}">${{etiqueta}}</td>`;
     diasHabiles.forEach(({{ d }}) => {{
       const score = evalData[d]?.[act] ?? '';
       const cls   = score !== '' ? `score-badge-${{score}}` : 'bg-gray-900/40 text-gray-700';
@@ -2595,16 +2627,21 @@ function verTarjeta() {{
   const meses=['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
   const mesNombre=meses[mesN-1];
 
-  let totalScores=[]; 
+  let totalScores=[];
   let filasTarjeta='';
-  (colab.actividades||[]).forEach(act=>{{
+  // Actividades activas + cualquiera desactivada que ya tenga calificaciones
+  // ese mes, para que el desglose no pierda su historial.
+  const actsActivas=colab.actividades||[];
+  const actsTarjeta=[...actsActivas, ...Object.keys(actScores).filter(a=>!actsActivas.includes(a))];
+  actsTarjeta.forEach(act=>{{
     const scores=actScores[act]||[];
     const avg=scores.length>0?scores.reduce((a,b)=>a+b,0)/scores.length:null;
     const pct=avg!==null?Math.round((avg/5)*100):null;
     totalScores.push(pct??0);
     const color=pct===null?'text-gray-500':pct>=80?'text-emerald-400':pct>=60?'text-yellow-400':'text-rose-400';
+    const esInactiva=!actsActivas.includes(act);
     filasTarjeta+=`<tr class="border-b border-gray-800/60">
-      <td class="py-1.5 px-2 text-[10px] font-bold text-gray-300 uppercase">${{act}}</td>
+      <td class="py-1.5 px-2 text-[10px] font-bold ${{esInactiva?'text-gray-500':'text-gray-300'}} uppercase">${{act}}${{esInactiva?' <span class="text-gray-600 normal-case">(inactiva)</span>':''}}</td>
       <td class="py-1.5 px-2 text-right font-black text-sm ${{color}}">${{pct!==null?pct+'%':'—'}}</td>
     </tr>`;
   }});
@@ -2662,24 +2699,70 @@ function toggleTipoPuestoPersonalizado() {{
 // Agrega al textarea de actividades las actividades oficiales (del descriptivo
 // de puesto) de los tipos de puesto marcados, sin borrar ni duplicar nada de
 // lo que ya esté escrito — solo complementa.
+// ── Actividades del colaborador: filas con casilla activa/inactiva ────────
+// En vez de un textarea donde una línea se puede borrar sin querer, cada
+// actividad es su propia fila: la casilla la oculta de la evaluación diaria
+// sin eliminarla (se puede reactivar cuando quieras); el botón 🗑 sí la
+// quita de la lista, pero solo antes de dar clic en "Guardar".
+let colabActsState = []; // [{{nombre, activa}}]
+
+function renderColabActsRows() {{
+  const cont = document.getElementById('col-actividades-list');
+  if (!colabActsState.length) {{
+    cont.innerHTML = '<p class="text-[10px] text-gray-600 py-2 text-center">Sin actividades todavía. Agrega una abajo o carga las del descriptivo de puesto.</p>';
+    return;
+  }}
+  cont.innerHTML = colabActsState.map((a,i) => `
+    <div class="flex items-center gap-2 bg-gray-950/60 rounded-lg px-2 py-1.5">
+      <input type="checkbox" class="accent-emerald-500" ${{a.activa?'checked':''}} onchange="toggleColabActFila(${{i}})" title="${{a.activa?'Desmarcar para dejar de evaluarla (no se borra)':'Marcar para volver a evaluarla'}}">
+      <span class="flex-1 text-[11px] ${{a.activa?'text-gray-200':'text-gray-600 line-through'}}">${{a.nombre}}</span>
+      <button type="button" onclick="eliminarColabActFila(${{i}})" title="Eliminar definitivamente (no solo ocultar)" class="text-gray-600 hover:text-rose-400 text-xs px-1">🗑</button>
+    </div>`).join('');
+}}
+
+function toggleColabActFila(i) {{
+  if (!colabActsState[i]) return;
+  colabActsState[i].activa = !colabActsState[i].activa;
+  renderColabActsRows();
+}}
+
+function eliminarColabActFila(i) {{
+  if (!colabActsState[i]) return;
+  if (!confirm(`¿Eliminar definitivamente "${{colabActsState[i].nombre}}"? Si solo quieres dejar de evaluarla, mejor desmarca su casilla.`)) return;
+  colabActsState.splice(i,1);
+  renderColabActsRows();
+}}
+
+function agregarColabActManual() {{
+  const input = document.getElementById('col-actividad-nueva');
+  const nombre = input.value.trim();
+  if (!nombre) return;
+  if (colabActsState.some(a=>a.nombre.toUpperCase()===nombre.toUpperCase())) {{
+    showRes('res-colab','⚠ Esa actividad ya está en la lista.','err');
+    document.getElementById('res-colab').classList.remove('hidden');
+    return;
+  }}
+  colabActsState.push({{nombre, activa:true}});
+  input.value='';
+  renderColabActsRows();
+}}
+
 function cargarActividadesSugeridas() {{
   const puestos = Array.from(document.querySelectorAll('.col-puesto-chk:checked')).map(el=>el.value);
-  if (!puestos.length) {{ showRes('res-colab','⚠ Marca primero al menos un tipo de puesto.','err'); return; }}
-  const ta = document.getElementById('col-actividades');
-  const actuales = ta.value.split('\\n').map(s=>s.trim()).filter(Boolean);
-  const actualesNorm = actuales.map(s=>s.toUpperCase());
+  if (!puestos.length) {{ showRes('res-colab','⚠ Marca primero al menos un tipo de puesto.','err'); document.getElementById('res-colab').classList.remove('hidden'); return; }}
+  const actualesNorm = colabActsState.map(a=>a.nombre.toUpperCase());
   let agregadas = 0;
   puestos.forEach(p => {{
     (PUESTO_ACTIVIDADES_JS[p]||[]).forEach(act => {{
       if (!actualesNorm.includes(act.toUpperCase())) {{
-        actuales.push(act);
+        colabActsState.push({{nombre:act, activa:true}});
         actualesNorm.push(act.toUpperCase());
         agregadas++;
       }}
     }});
   }});
-  ta.value = actuales.join('\\n');
-  if (agregadas) showRes('res-colab',`✓ Se agregaron ${{agregadas}} actividad(es) del descriptivo de puesto. Puedes editarlas antes de guardar.`,'ok');
+  renderColabActsRows();
+  if (agregadas) showRes('res-colab',`✓ Se agregaron ${{agregadas}} actividad(es) del descriptivo de puesto. Puedes desmarcarlas o editarlas antes de guardar.`,'ok');
   else showRes('res-colab','Ya tenías todas las actividades oficiales de ese puesto — no se agregó nada nuevo.','ok');
   document.getElementById('res-colab').classList.remove('hidden');
 }}
@@ -2903,7 +2986,8 @@ function abrirAgregarColab(){{
   document.querySelectorAll('.col-puesto-chk').forEach(chk=>chk.checked=false);
   document.getElementById('col-puesto-custom').value='';
   document.getElementById('col-puesto-custom-box').classList.add('hidden');
-  document.getElementById('col-actividades').value='';
+  colabActsState=[];
+  renderColabActsRows();
   document.getElementById('res-colab').classList.add('hidden');
   document.getElementById('modal-colab').classList.remove('hidden');
 }}
@@ -2927,7 +3011,11 @@ function abrirEditarColab(nombre){{
     if(chkOtro)chkOtro.checked=true;
   }}
   toggleTipoPuestoPersonalizado();
-  document.getElementById('col-actividades').value=(colab.actividades||[]).join('\\n');
+  colabActsState = [
+    ...(colab.actividades||[]).map(n=>({{nombre:n, activa:true}})),
+    ...(colab.actividades_inactivas||[]).map(n=>({{nombre:n, activa:false}})),
+  ];
+  renderColabActsRows();
   document.getElementById('res-colab').classList.add('hidden');
   document.getElementById('modal-colab').classList.remove('hidden');
 }}
@@ -2937,11 +3025,12 @@ async function guardarColab(){{
   const nombre=document.getElementById('col-nombre').value.trim();
   const puestos=Array.from(document.querySelectorAll('.col-puesto-chk:checked')).map(el=>el.value);
   const puestoCustom=document.getElementById('col-puesto-custom')?.value.trim() || '';
-  const acts=document.getElementById('col-actividades').value.split('\\n').map(s=>s.trim().toUpperCase()).filter(Boolean);
-  if(!nombre||!puestos.length||acts.length===0){{showRes('res-colab','⚠ Completa el nombre, al menos un tipo de puesto y las actividades.','err');return;}}
+  const acts=colabActsState.filter(a=>a.activa).map(a=>a.nombre.trim().toUpperCase()).filter(Boolean);
+  const actsInactivas=colabActsState.filter(a=>!a.activa).map(a=>a.nombre.trim().toUpperCase()).filter(Boolean);
+  if(!nombre||!puestos.length||colabActsState.length===0){{showRes('res-colab','⚠ Completa el nombre, al menos un tipo de puesto y al menos una actividad.','err');return;}}
   if(puestos.includes('Otro') && !puestoCustom){{showRes('res-colab','⚠ Especifica el puesto personalizado.','err');return;}}
   const r=await fetch('/api/colaborador',{{method:'POST',headers:{{'Content-Type':'application/json'}},
-    body:JSON.stringify({{nombre,puestos,puesto_personalizado:puestoCustom,actividades:acts}})}});
+    body:JSON.stringify({{nombre,puestos,puesto_personalizado:puestoCustom,actividades:acts,actividades_inactivas:actsInactivas}})}});
   if(r.ok){{showRes('res-colab',editando?'✓ Colaborador actualizado.':'✓ Colaborador agregado.','ok');setTimeout(()=>location.reload(),800);}}
   else showRes('res-colab','⚠ '+(await r.json()).detail,'err');
 }}
