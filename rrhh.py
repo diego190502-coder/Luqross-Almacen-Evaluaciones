@@ -2180,9 +2180,11 @@ function renderTarjetasEquipo() {{
     COLABS_DATA.forEach(colab => {{
       const evsMes = EVALS_DATA.filter(e => e.colaborador === colab.nombre && e.anio === anio && e.mes === mes);
       if (evsMes.length === 0) return;
+      const actsActivasSet = new Set((colab.actividades||[]).map(a=>a.toUpperCase()));
       const actMap = {{}};
       evsMes.forEach(e => {{
         if (e.calificaciones) Object.entries(e.calificaciones).forEach(([act, val]) => {{
+          if (!actsActivasSet.has(act.toUpperCase())) return;
           if (!actMap[act]) actMap[act] = [];
           actMap[act].push(val);
         }});
