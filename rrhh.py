@@ -50,6 +50,30 @@ TIPOS_PUESTO = ["Coordinación de Logística y Almacén","Auxiliar de almacén y
                 "Chófer Almacenista A","Chófer Almacenista B",
                 "Auxiliar de Almacén A","Auxiliar de Almacén B","Otro"]
 
+# Ícono de marca (círculo negro + glifo azul + acentos amarillo/rojo, estilo
+# del logo de Luqross) para cada tipo de puesto. Si el archivo no existe no
+# se rompe nada — simplemente no se muestra ícono para ese puesto.
+PUESTO_ICONOS = {
+    "Coordinación de Logística y Almacén": "coordinacion.png",
+    "Auxiliar de almacén y logística": "auxiliar_logistica.png",
+    "Supervisor de Piso": "supervisor.png",
+    "Analista de almacén y operaciones": "analista.png",
+    "Chófer Almacenista A": "chofer_a.png",
+    "Chófer Almacenista B": "chofer_b.png",
+    "Auxiliar de Almacén A": "auxiliar_a.png",
+    "Auxiliar de Almacén B": "auxiliar_b.png",
+    "Otro": "otro.png",
+}
+
+def icono_puesto_html(puesto, size=16):
+    archivo = PUESTO_ICONOS.get(puesto)
+    if not archivo or not os.path.exists(f"static/puestos/{archivo}"):
+        return ""
+    return f'<img src="/static/puestos/{archivo}" alt="" title="{puesto}" class="inline-block rounded-full shrink-0" style="width:{size}px;height:{size}px;">'
+
+def iconos_puestos_html(puestos, size=16):
+    return "".join(icono_puesto_html(p, size) for p in (puestos or []))
+
 # Actividades sugeridas por puesto, tomadas de las Descripciones de Puesto (DP)
 # oficiales de Grupo Luqross (sección "3.1 Actividades" de cada DP). Sirven como
 # punto de partida al dar de alta/editar a un colaborador — el usuario puede
@@ -549,8 +573,14 @@ def exportar_evaluaciones(anio: int, mes: int):
                 act_map[act].append(val)
         act_promedios = {a: round(sum(v)/len(v)/5*100,1) for a,v in act_map.items()}
         prom_global_bruto = round(sum(act_promedios.values())/len(act_promedios),1) if act_promedios else 0
-        mejor = max(act_promedios, key=act_promedios.get) if act_promedios else "—"
-        peor  = min(act_promedios, key=act_promedios.get) if act_promedios else "—"
+        # "Mejor/Peor actividad" prefieren nombrar una actividad activa actual
+        # (para no mostrar una ya desactivada); si ese mes no hay datos de
+        # ninguna activa, se cae de regreso a todas las registradas.
+        act_activas_upper = set(a.upper() for a in (colab.get("actividades") or []))
+        act_prom_activas = {a: p for a, p in act_promedios.items() if a.upper() in act_activas_upper}
+        base_mejor_peor = act_prom_activas or act_promedios
+        mejor = max(base_mejor_peor, key=base_mejor_peor.get) if base_mejor_peor else "—"
+        peor  = min(base_mejor_peor, key=base_mejor_peor.get) if base_mejor_peor else "—"
         n_inc = inc_por_colab.get(colab["nombre"], 0)
         # Cada incidencia del mes resta puntos porcentuales al promedio global final.
         prom_global = max(0, round(prom_global_bruto - n_inc * PENALIZACION_POR_INCIDENCIA_PCT, 1))
@@ -577,6 +607,67 @@ def exportar_evaluaciones(anio: int, mes: int):
 
     fila += 2
 
+    # ── SECCIÓN: TIEMPOS DE PREPARACIÓN (LOCAL / PAQUETERÍA) ─────────────
+    # Mismo criterio que el tablero: ALMACEN = Paquetería (meta <5h),
+    # todos los demás = Local (meta <3h). Colores de marca Luqross.
+    horas_mes = [h for h in db_fetch("SELECT * FROM horas") if h.get("fecha") and h["fecha"][:4].isdigit()
+                 and int(h["fecha"][:4]) == anio and int(h["fecha"][5:7]) == mes
+                 and h.get("minutos_prep") is not None]
+    local_h_mes = [h for h in horas_mes if (h.get("colaborador") or "").upper() != "ALMACEN"]
+    paq_h_mes   = [h for h in horas_mes if (h.get("colaborador") or "").upper() == "ALMACEN"]
+
+    def _stats_prep(rows):
+        if not rows:
+            return {"n": 0, "pct": None, "prom_min": None}
+        ok = sum(1 for h in rows if h.get("efic_prep") is not None and h["efic_prep"] >= 100)
+        pct = round((ok/len(rows))*100, 1)
+        prom_min = round(sum(h["minutos_prep"] for h in rows)/len(rows), 1)
+        return {"n": len(rows), "pct": pct, "prom_min": prom_min}
+
+    def _mins_hms(mins):
+        if mins is None: return "—"
+        h, m = int(mins)//60, int(mins) % 60
+        return f"{h:02d}:{m:02d}:00"
+
+    st_local = _stats_prep(local_h_mes)
+    st_paq   = _stats_prep(paq_h_mes)
+
+    ws.merge_cells(f"A{fila}:H{fila}")
+    cell = ws.cell(fila, 1, f"TIEMPOS DE PREPARACIÓN — {nombre_mes.upper()} {anio}")
+    aplicar_estilo(cell, fill=PatternFill("solid", fgColor="05070a"),
+                   font=Font(color="FCDB07", bold=True, size=12, name="Calibri"),
+                   alignment=Alignment(horizontal="center", vertical="center"),
+                   border=Border(left=Side(style="thin", color="888888"), right=Side(style="thin", color="888888"),
+                                  top=Side(style="thin", color="888888"), bottom=Side(style="thin", color="888888")))
+    ws.row_dimensions[fila].height = 22
+    fila += 1
+
+    headers_prep = ["Entrega","Objetivo","Entregas evaluadas","Tiempo promedio","Cumplimiento %"]
+    for col, h in enumerate(headers_prep, 1):
+        cell = ws.cell(fila, col, h)
+        aplicar_estilo(cell, **estilo_header("1D9BD7", "ffffff"))
+        ws.column_dimensions[get_column_letter(col)].width = max(ws.column_dimensions[get_column_letter(col)].width or 0, len(h)+4)
+    ws.row_dimensions[fila].height = 18
+    fila += 1
+
+    for etiqueta, objetivo, st in [("LOCAL", "Menos de 3h", st_local), ("PAQUETERÍA", "Menos de 5h", st_paq)]:
+        vals = [etiqueta, objetivo, st["n"], _mins_hms(st["prom_min"]),
+                f"{st['pct']}%" if st["pct"] is not None else "—"]
+        for col, v in enumerate(vals, 1):
+            cell = ws.cell(fila, col, v)
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+            cell.border = Border(left=Side(style="thin", color="cccccc"), right=Side(style="thin", color="cccccc"),
+                                  top=Side(style="thin", color="cccccc"), bottom=Side(style="thin", color="cccccc"))
+            if col == 1:
+                cell.font = Font(bold=True, color="FFFFFF", name="Calibri")
+                cell.fill = PatternFill("solid", fgColor="1D9BD7")
+            if col == 5 and st["pct"] is not None:
+                cell.fill = PatternFill("solid", fgColor=color_pct(st["pct"]))
+                cell.font = Font(bold=True, color="FFFFFF", name="Calibri")
+        fila += 1
+
+    fila += 2
+
     # ── SECCIÓN 2: DETALLE DÍA A DÍA ─────────────────────────────────────
     ws.merge_cells(f"A{fila}:H{fila}")
     cell = ws.cell(fila, 1, f"DETALLE DÍA A DÍA — {nombre_mes.upper()} {anio}")
@@ -595,17 +686,9 @@ def exportar_evaluaciones(anio: int, mes: int):
         ws.row_dimensions[fila].height = 20
         fila += 1
 
-        # Obtener todas las actividades del colaborador: las activas actuales,
-        # más cualquier actividad que ya no esté activa pero sí tenga
-        # calificaciones registradas ese mes (para no perder su historial del
-        # reporte solo porque después se haya desactivado).
+        # Solo las actividades activas actuales del colaborador (acorde a su
+        # puesto vigente); las desactivadas no aparecen en este desglose.
         actividades = list(colab.get("actividades", []) or [])
-        vistas = set(a.upper() for a in actividades)
-        for e in evals_colab:
-            for act_hist in (e.get("calificaciones") or {}).keys():
-                if act_hist.upper() not in vistas:
-                    vistas.add(act_hist.upper())
-                    actividades.append(act_hist)
 
         # Header tabla: Actividad | Día 1 | Día 2 | ... | Promedio
         dias_eval = sorted(set(e["dia"] for e in evals_colab))
@@ -1407,7 +1490,7 @@ input[type=range]{{accent-color:#FCDB07;}}
       <div>
         <label class="lbl">Tipo de Puesto (puedes marcar varios)</label>
         <div class="field" style="display:flex;flex-direction:column;gap:6px;">
-          {"".join([f'<label class="flex items-center gap-2 text-[11px] text-gray-300 hover:text-white cursor-pointer"><input type="checkbox" class="col-puesto-chk accent-yellow-500" value="{t}" onchange="{"toggleTipoPuestoPersonalizado()" if t=="Otro" else ""}"> {t}</label>' for t in TIPOS_PUESTO])}
+          {"".join([f'<label class="flex items-center gap-2 text-[11px] text-gray-300 hover:text-white cursor-pointer"><input type="checkbox" class="col-puesto-chk accent-yellow-500" value="{t}" onchange="{"toggleTipoPuestoPersonalizado()" if t=="Otro" else ""}"> {icono_puesto_html(t, 18)} {t}</label>' for t in TIPOS_PUESTO])}
         </div>
       </div>
       <div id="col-puesto-custom-box" class="hidden">
@@ -1945,7 +2028,10 @@ input[type=range]{{accent-color:#FCDB07;}}
         </div>
         <div class="flex-1">
           <p class="text-sm font-black text-white group-hover:text-yellow-400 transition-colors">{c['nombre']}</p>
-          <p class="text-[10px] text-gray-500 uppercase">{", ".join(c.get('puestos') or [])}</p>
+          <div class="flex items-center gap-1 flex-wrap mt-0.5">
+            {iconos_puestos_html(c.get('puestos'), 15)}
+            <p class="text-[10px] text-gray-500 uppercase">{", ".join(c.get('puestos') or [])}</p>
+          </div>
           <p class="text-[10px] text-yellow-500/70">{len(c.get('actividades',[]))} actividades</p>
         </div>
         <div class="flex flex-col items-end gap-1">
@@ -2497,17 +2583,12 @@ function marcarSeleccionadosExcelente() {{
 
 function renderTablaCalendario(anio, mesN, colab) {{
   const diasMes = new Date(anio, mesN, 0).getDate();
-  // Actividades activas + cualquiera ya desactivada que siga teniendo
-  // calificaciones guardadas este mes, para no perder su historial de vista.
+  // Solo las actividades activas del colaborador — las desactivadas no se
+  // muestran aquí (su historial se conserva en la base de datos y en el
+  // Excel exportado puede consultarse aparte si algún día hace falta).
   // (copia con .slice() para no mutar colab.actividades, que se reutiliza
   // en otras funciones como marcarSeleccionadosExcelente)
   const actividades = (colab.actividades || []).slice();
-  const vistasAct = new Set(actividades);
-  Object.values(evalData).forEach(cals => {{
-    Object.keys(cals||{{}}).forEach(act => {{
-      if (!vistasAct.has(act)) {{ vistasAct.add(act); actividades.push(act); }}
-    }});
-  }});
 
   // Días de la semana — sin domingos (dow=0)
   const DIAS_SEM = ['D','L','M','M','J','V','S'];
@@ -2531,9 +2612,7 @@ function renderTablaCalendario(anio, mesN, colab) {{
 
   let filas = '';
   actividades.forEach(act => {{
-    const esInactiva = !(colab.actividades||[]).includes(act);
-    const etiqueta = esInactiva ? `${{act}} <span class="text-gray-600 normal-case">(inactiva)</span>` : act;
-    let fila = `<td class="cal-cell bg-gray-950/60 ${{esInactiva?'text-gray-500':'text-gray-300'}} font-bold sticky left-0 z-10 text-left px-2 text-[10px] uppercase whitespace-nowrap" title="${{esInactiva?'Ya no está activa para evaluarse, pero conserva su historial de este mes':''}}">${{etiqueta}}</td>`;
+    let fila = `<td class="cal-cell bg-gray-950/60 text-gray-300 font-bold sticky left-0 z-10 text-left px-2 text-[10px] uppercase whitespace-nowrap">${{act}}</td>`;
     diasHabiles.forEach(({{ d }}) => {{
       const score = evalData[d]?.[act] ?? '';
       const cls   = score !== '' ? `score-badge-${{score}}` : 'bg-gray-900/40 text-gray-700';
@@ -2658,19 +2737,16 @@ function verTarjeta() {{
 
   let totalScores=[];
   let filasTarjeta='';
-  // Actividades activas + cualquiera desactivada que ya tenga calificaciones
-  // ese mes, para que el desglose no pierda su historial.
+  // Solo las actividades activas del colaborador.
   const actsActivas=colab.actividades||[];
-  const actsTarjeta=[...actsActivas, ...Object.keys(actScores).filter(a=>!actsActivas.includes(a))];
-  actsTarjeta.forEach(act=>{{
+  actsActivas.forEach(act=>{{
     const scores=actScores[act]||[];
     const avg=scores.length>0?scores.reduce((a,b)=>a+b,0)/scores.length:null;
     const pct=avg!==null?Math.round((avg/5)*100):null;
     totalScores.push(pct??0);
     const color=pct===null?'text-gray-500':pct>=80?'text-emerald-400':pct>=60?'text-yellow-400':'text-rose-400';
-    const esInactiva=!actsActivas.includes(act);
     filasTarjeta+=`<tr class="border-b border-gray-800/60">
-      <td class="py-1.5 px-2 text-[10px] font-bold ${{esInactiva?'text-gray-500':'text-gray-300'}} uppercase">${{act}}${{esInactiva?' <span class="text-gray-600 normal-case">(inactiva)</span>':''}}</td>
+      <td class="py-1.5 px-2 text-[10px] font-bold text-gray-300 uppercase">${{act}}</td>
       <td class="py-1.5 px-2 text-right font-black text-sm ${{color}}">${{pct!==null?pct+'%':'—'}}</td>
     </tr>`;
   }});
