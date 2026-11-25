@@ -41,6 +41,7 @@ async def proteger_con_login(request: Request, call_next):
 
 FONT_FILE  = "Strasua.ttf"
 LOGO_FILE  = "logo.png"
+ICONO_FILE = "icono_evaluacion.png"
 
 ESCALA = {0:"Crítico",1:"Insuficiente",2:"Necesita mejora",3:"En observación",4:"Satisfactorio",5:"Excelente"}
 TIPOS_INC = ["Falta","Retardo","Permiso","Accidente","Conducta","Material Sucio","Material Incompleto","Mal Etiquetado","Otro"]
@@ -995,7 +996,11 @@ def pagina():
         except Exception:
             h["anio"], h["mes"] = None, None
 
-    logo_html=f'<img src="/static/{LOGO_FILE}" alt="LUQROSS" class="w-28 h-auto object-contain block mr-4 select-none">' if os.path.exists(f"static/{LOGO_FILE}") else ""
+    logo_html=f'''<div class="relative mr-4 shrink-0">
+      <div class="absolute inset-0 rounded-full blur-xl opacity-40" style="background:radial-gradient(circle,#1D9BD7 0%,transparent 70%)"></div>
+      <img src="/static/{LOGO_FILE}" alt="LUQROSS" class="relative w-24 h-auto object-contain block select-none drop-shadow-[0_0_14px_rgba(29,155,215,0.35)]">
+    </div>''' if os.path.exists(f"static/{LOGO_FILE}") else ""
+    icono_badge_html=f'<img src="/static/{ICONO_FILE}" alt="" class="w-5 h-5 rounded-full shrink-0">' if os.path.exists(f"static/{ICONO_FILE}") else "✓"
     # "_activos": para registrar cosas NUEVAS (evaluación, incidencia, horas) — solo colaboradores activos.
     # "_todos": para filtros/análisis histórico — incluye también a los desactivados, para no perder su historial.
     opts_colab_activos="".join([f'<option value="{c["nombre"]}">{c["nombre"]}</option>' for c in colaboradores_activos])
@@ -1412,7 +1417,10 @@ input[type=range]{{accent-color:#FCDB07;}}
       <div>
         <div class="flex items-center justify-between">
           <label class="lbl mb-0">Actividades a Evaluar</label>
-          <button type="button" onclick="cargarActividadesSugeridas()" title="Agrega las actividades oficiales del descriptivo de puesto (DP) para los puestos marcados arriba, sin borrar ni desmarcar lo que ya tengas" class="text-[9px] text-yellow-500 hover:text-yellow-300 font-bold uppercase border border-yellow-500/40 rounded-lg px-2 py-1 whitespace-nowrap">📋 Cargar del descriptivo de puesto</button>
+          <div class="flex gap-1.5">
+            <button type="button" onclick="cargarActividadesSugeridas()" title="Agrega las actividades oficiales del descriptivo de puesto (DP) para los puestos marcados arriba, sin borrar ni desmarcar lo que ya tengas" class="text-[9px] text-yellow-500 hover:text-yellow-300 font-bold uppercase border border-yellow-500/40 rounded-lg px-2 py-1 whitespace-nowrap">📋 Cargar del descriptivo</button>
+            <button type="button" onclick="reemplazarActividadesSugeridas()" title="Borra TODAS las actividades actuales de la lista y las reemplaza solo por las oficiales del descriptivo de puesto" class="text-[9px] text-rose-400 hover:text-rose-300 font-bold uppercase border border-rose-500/40 rounded-lg px-2 py-1 whitespace-nowrap">🔄 Reemplazar con el descriptivo</button>
+          </div>
         </div>
         <p class="text-[9px] text-gray-600 mb-1">Desmarca la casilla para dejar de evaluarla sin borrarla (puedes reactivarla cuando quieras); usa 🗑 solo si de verdad quieres eliminarla.</p>
         <div id="col-actividades-list" class="field resize-none" style="max-height:220px;overflow-y:auto;display:flex;flex-direction:column;gap:4px;"></div>
@@ -1428,11 +1436,15 @@ input[type=range]{{accent-color:#FCDB07;}}
 </div>
 
 <!-- HEADER -->
-<div class="w-full max-w-[1600px] bg-gray-900/40 border border-gray-800 backdrop-blur-md rounded-2xl p-4 mb-4 shadow-2xl flex flex-col md:flex-row items-center justify-between gap-4">
+<div class="relative w-full max-w-[1600px] bg-gray-900/40 border border-gray-800 backdrop-blur-md rounded-2xl p-4 mb-4 shadow-2xl flex flex-col md:flex-row items-center justify-between gap-4 overflow-hidden">
+  <div class="absolute top-0 left-0 right-0 h-[3px]" style="background:linear-gradient(90deg,#FCDB07 0%,#1D9BD7 50%,#E11E26 100%)"></div>
   <div class="flex items-center">{logo_html}
     <div>
       <h1 class="text-3xl font-black tracking-wider text-white font-custom">LUQROSS AUTOMOTRIZ</h1>
-      <p class="text-[10px] text-gray-500 tracking-widest font-bold uppercase mt-0.5">Gestión de Personal — Evaluaciones & KPIs</p>
+      <div class="inline-flex items-center gap-1.5 bg-blue-500/10 border border-blue-500/30 rounded-full pl-1 pr-2.5 py-0.5 mt-1.5">
+        {icono_badge_html}
+        <span class="text-[9px] text-blue-300 tracking-widest font-bold uppercase">Evaluación de Personal &amp; KPIs</span>
+      </div>
     </div>
   </div>
   <div class="flex items-center gap-2 self-end">
@@ -2781,6 +2793,30 @@ function cargarActividadesSugeridas() {{
   renderColabActsRows();
   if (agregadas) showRes('res-colab',`✓ Se agregaron ${{agregadas}} actividad(es) del descriptivo de puesto. Puedes desmarcarlas o editarlas antes de guardar.`,'ok');
   else showRes('res-colab','Ya tenías todas las actividades oficiales de ese puesto — no se agregó nada nuevo.','ok');
+  document.getElementById('res-colab').classList.remove('hidden');
+}}
+
+// Borra TODAS las actividades actuales de la lista (en memoria, nada se
+// guarda hasta darle "Guardar Cambios") y las deja solo con las oficiales
+// del descriptivo de puesto de los tipos de puesto marcados — un "borrón y
+// cuenta nueva" para cuando la lista ya no refleja el puesto real.
+function reemplazarActividadesSugeridas() {{
+  const puestos = Array.from(document.querySelectorAll('.col-puesto-chk:checked')).map(el=>el.value);
+  if (!puestos.length) {{ showRes('res-colab','⚠ Marca primero al menos un tipo de puesto.','err'); document.getElementById('res-colab').classList.remove('hidden'); return; }}
+  if (!confirm('Esto va a BORRAR todas las actividades actuales de la lista (de la pantalla, aún no se guarda nada) y dejar solo las oficiales del descriptivo de puesto marcado. ¿Continuar?')) return;
+  const nuevas = [];
+  const vistas = new Set();
+  puestos.forEach(p => {{
+    (PUESTO_ACTIVIDADES_JS[p]||[]).forEach(act => {{
+      if (!vistas.has(act.toUpperCase())) {{
+        nuevas.push({{nombre:act, activa:true}});
+        vistas.add(act.toUpperCase());
+      }}
+    }});
+  }});
+  colabActsState = nuevas;
+  renderColabActsRows();
+  showRes('res-colab',`✓ Se reemplazó la lista por las ${{nuevas.length}} actividad(es) oficiales del descriptivo de puesto. Dale "Guardar Cambios" para confirmar.`,'ok');
   document.getElementById('res-colab').classList.remove('hidden');
 }}
 
