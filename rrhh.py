@@ -1158,20 +1158,36 @@ def pagina():
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>LUQROSS | Almacen Evaluaciones</title>
-        <link rel="icon" type="image/png" href="/static/logo.png">
+        <link rel="icon" type="image/png" href="/static/icono_evaluacion.png">
 <script src="https://cdn.tailwindcss.com"></script>
+<script>
+// Paleta oficial de marca Luqross (del logo): negro, azul, amarillo y rojo.
+// Esto remplaza los tonos genéricos de Tailwind por los colores reales de
+// marca en TODA la página, sin tener que tocar cada clase una por una.
+tailwind.config = {{
+  theme: {{
+    extend: {{
+      colors: {{
+        yellow: {{50:'#fffdf0',100:'#fffadc',200:'#fef4b3',300:'#fdec7c',400:'#fde235',500:'#FCDB07',600:'#d2b603',700:'#a48e02',800:'#766601',900:'#4d4301',950:'#292300'}},
+        rose:   {{50:'#fdf2f2',100:'#fbe0e1',200:'#f6bbbe',300:'#ef8a8e',400:'#e74b51',500:'#E11E26',600:'#b8191f',700:'#901318',800:'#680e11',900:'#44090b',950:'#240506'}},
+        blue:   {{50:'#f2f9fd',100:'#e0f2fb',200:'#bce3f6',300:'#8acfef',400:'#4bb5e7',500:'#1D9BD7',600:'#187fb0',700:'#13638a',800:'#0d4763',900:'#092f40',950:'#051922'}},
+      }}
+    }}
+  }}
+}};
+</script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 <style>
 @font-face{{font-family:'MiFuenteCustom';src:url('/static/{FONT_FILE}') format('truetype');}}
 .font-custom{{font-family:'MiFuenteCustom',sans-serif;letter-spacing:.05em;}}
-body{{background:radial-gradient(circle at top,#1a3a5c 0%,#0d1f35 60%, #071525 100%) fixed;}}
-input[type=range]{{accent-color:#eab308;}}
+body{{background:radial-gradient(circle at top,#0d1a26 0%,#070f16 55%, #05070a 100%) fixed;}}
+input[type=range]{{accent-color:#FCDB07;}}
 .tab-btn{{padding:.625rem .875rem;font-size:.75rem;text-transform:uppercase;letter-spacing:.05em;transition:all .2s;font-family:'MiFuenteCustom',sans-serif;color:#9ca3af;}}
 .tab-btn:hover{{color:#e5e7eb;}}
-.tab-btn.active{{border-bottom:2px solid #eab308;color:#eab308;font-weight:700;}}
+.tab-btn.active{{border-bottom:2px solid #FCDB07;color:#FCDB07;font-weight:700;}}
 .field{{width:100%;background:#030712;border:1px solid #1f2937;border-radius:.75rem;padding:.5rem .75rem;font-size:.75rem;color:#fff;outline:none;transition:border-color .2s;}}
-.field:focus{{border-color:#eab308;}}
+.field:focus{{border-color:#FCDB07;}}
 .lbl{{display:block;font-size:.625rem;color:#6b7280;text-transform:uppercase;font-weight:700;margin-bottom:.25rem;}}
 .cal-cell{{min-width:38px;text-align:center;font-size:10px;border:1px solid #1f2937;padding:2px;}}
 .score-badge-0{{background:#7f1d1d;color:#fca5a5;}}
